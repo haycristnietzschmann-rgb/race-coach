@@ -1,0 +1,8 @@
+backend/.env
+backend/venv/
+backend/__pycache__/
+backend/daily_cache.json
+backend/subscriptions.json
+backend/private_key.pem
+backend/public_key.pem
+.DS_Store
