@@ -470,7 +470,21 @@ def estimate_pr_5k(personal_records: dict, activities: list[dict],
     if role == "deload":
         weekly_pct = min(weekly_pct, 0.0)
     proj = current * (1 - weekly_pct) ** 4
-    delta = round(current - proj)
+    proj = min(proj, current)                 # "potential" can't be slower than the PR
+    delta = round(current - proj)             # >= 0, seconds you could take off
+    if delta <= 1:
+        rationale = (
+            f"Your 5K PR is {_sec_to_clock(current)} ({source}). Current fitness trend "
+            f"({note}) is flat-to-down, so 4 weeks of this training points at matching "
+            f"the PR rather than beating it — build a bit more before expecting a new one."
+        )
+    else:
+        rationale = (
+            f"Your 5K PR is {_sec_to_clock(current)} ({source}). Current fitness trend "
+            f"({note}) works out to roughly {weekly_pct*100:+.1f}%/wk at 5K pace, so about "
+            f"{_sec_to_clock(proj)} looks reachable in ~4 weeks if training holds "
+            f"(−{delta}s). Not a race-day prediction — assumes a good day and a real effort."
+        )
     return {
         "pr_sec": round(current),
         "pr_str": _sec_to_clock(current),
@@ -479,13 +493,7 @@ def estimate_pr_5k(personal_records: dict, activities: list[dict],
         "projection_4wk_str": _sec_to_clock(proj),
         "delta_sec": delta,
         "trend_note": note,
-        "rationale": (
-            f"Your 5K PR is {_sec_to_clock(current)} ({source}). Current fitness trend "
-            f"({note}) works out to about {weekly_pct*100:+.1f}%/wk at 5K pace, so a "
-            f"{_sec_to_clock(proj)} 5K looks achievable in ~4 weeks if training holds "
-            f"({'-' if delta>=0 else '+'}{abs(delta)}s). Not a race-day prediction — it "
-            f"assumes a good day and a real 5K effort."
-        ),
+        "rationale": rationale,
     }
 
 
@@ -732,7 +740,7 @@ def build_fitness(garmin) -> dict:
     pace_series = pace_at_hr_series(activities, weeks=12)
     rhr_series = safe(lambda: garmin.resting_hr_trend(weeks=12), [])
     endurance = safe(lambda: garmin.endurance_score(), {})
-    endurance_series = endurance.get("enduranceScoreDTO", {}).get("groupList", []) if isinstance(endurance, dict) else []
+    endurance_series = ((endurance or {}).get("enduranceScoreDTO") or {}).get("groupList", []) if isinstance(endurance, dict) else []
     ts = safe(lambda: garmin.training_status(), {})
     stats_today = safe(lambda: garmin.stats(), {})
 
