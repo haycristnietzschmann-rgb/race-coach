@@ -646,7 +646,7 @@
     activeSports[sport] = !activeSports[sport];
     saveSettings();
     renderSettingsSportGrid();
-    currentPlan = activeRace === "palma" ? buildPalmaPlan() : buildGeneralPlan();
+    currentPlan = activeRace === "palma" ? hydratePlan(buildPalmaPlan(), "palma") : hydrateFixed(buildTrainingPlan());
     if (document.getElementById("panel-race").classList.contains("active")) renderRaceCoach();
   }
 
@@ -1776,49 +1776,223 @@
     return applySportFilter(weeks);
   }
 
-  function buildGeneralPlan() {
-    var phases = ["Base", "Build", "Peak", "Recovery"];
-    var volumeTargets = [
-      { swim: "2 km", bike: "100 km", run: "12 km" },
-      { swim: "3 km", bike: "120 km", run: "15 km" },
-      { swim: "3.5 km", bike: "140 km", run: "17 km" },
-      { swim: "1.5 km", bike: "60 km", run: "8 km" }
-    ];
-    var pool = [
-      { type: "Bike", title: "Long endurance ride", detail: "General aerobic base, length is yours to set",
-        why: "The core of steady fitness building - most of your bike volume should live at an easy, sustainable effort.", effort: "Zone 2 - conversational", duration: "Yours to set" },
-      { type: "Bike", title: "Tempo ride", detail: "45-60min with a sustained moderately hard block",
-        why: "Bike-specific fitness stimulus that doesn't require an interval structure - intervals stay on the run for this plan.", effort: "Zone 3 - comfortably hard", duration: "45-60 min" },
-      { type: "Run", title: "Easy run", detail: "30min Z1-Z2",
-        why: "Aerobic base for the run - most run volume belongs here, not in hard efforts.", effort: "Zone 1-2, conversational", duration: "30 min" },
-      { type: "Run", title: "Interval run", detail: "5x400m @ 5K pace, 90s jog recovery",
-        why: "This is where speed and top-end fitness come from - short sharp efforts with real recovery between.", effort: "Hard - 5K race effort", duration: "~30 min total" },
-      { type: "Swim", title: "Easy swim", detail: "1000m technique focus",
-        why: "Technique-focused swimming builds efficiency, which matters more than raw fitness for most swimmers.", effort: "Easy-moderate, form-focused", duration: "30 min" },
-      { type: "Strength", title: "Full body strength", detail: "General strength, 40min",
-        why: "Supports injury resilience and power across all three disciplines.", effort: "Moderate-hard, controlled", duration: "40 min" }
-    ];
+  // ============================================================
+  // FIXED WEEKLY SCHEDULE  (general / no-race mode)
+  // A locked afternoon/evening template + a rolling 4-week block
+  // (build / build+ / peak / deload) anchored to Mon 2026-09-01.
+  // Volume numbers here are provisional defaults — the adaptive
+  // engine (next build step) will set them from ~12 weeks of Garmin.
+  // ============================================================
+  var BLOCK_ANCHOR = "2026-09-01";                 // Monday = Cycle 1 / Week 1
+  var FP_ROLES = ["build", "build+", "peak", "deload"];
+
+  // day 0..6 = Mon..Sun. lift = fixed strength that always happens first.
+  var FIXED_SCHEDULE = [
+    { name: "Mon", start: "21:00",   cap: "≤ 90 min", lift: "Push", slot: "run-quality" },
+    { name: "Tue", start: "21:00",   cap: "≤ 90 min", lift: "Pull", slot: "bike-quality" },
+    { name: "Wed", start: "19:00",   cap: "2–3 h",    lift: null,   slot: "midweek-long" },
+    { name: "Thu", start: "21:00",   cap: "≤ 90 min", lift: "Push", slot: "easy-run" },
+    { name: "Fri", start: null,      cap: null,            lift: "Pull", slot: "cardio-rest" },
+    { name: "Sat", start: "morning", cap: "≤ 60 min", lift: "Legs", slot: "sat-choice" },
+    { name: "Sun", start: null,      cap: "3–5 h",    lift: null,   slot: "long-ride" }
+  ];
+
+  // Local-date ISO (YYYY-MM-DD) — never toISOString(), which shifts to UTC and
+  // can roll a local-midnight date back a day in positive-offset zones.
+  function fpIso(d) { var x = new Date(d); return x.getFullYear() + "-" + ("0" + (x.getMonth()+1)).slice(-2) + "-" + ("0" + x.getDate()).slice(-2); }
+  function fpMonday(d) { var x = new Date(d); x.setHours(0,0,0,0); x.setDate(x.getDate() - ((x.getDay()+6)%7)); return x; }
+  function fpAddDays(iso, n) { var x = new Date(iso + "T00:00:00"); x.setDate(x.getDate() + n); return fpIso(x); }
+  function S(type, title, detail, effort, duration, why, intensity) {
+    return { type: type, title: title, detail: detail, effort: effort, duration: duration, why: why, intensity: intensity || "Easy" };
+  }
+
+  function fpWeekMeta(mondayIso) {
+    var a = fpMonday(BLOCK_ANCHOR + "T00:00:00"), m = fpMonday(mondayIso + "T00:00:00");
+    var w = Math.round((m - a) / (7 * 86400000));
+    var idx = ((w % 4) + 4) % 4;
+    return {
+      weeksSince: w,
+      cycle: Math.max(1, Math.floor(w / 4) + 1),
+      weekInCycle: idx + 1,
+      role: FP_ROLES[idx],
+      focus: (((Math.floor(w / 4) % 2) + 2) % 2) === 0 ? "bike" : "run"  // cycle 1 = bike, alternates
+    };
+  }
+
+  function fpVolumeTarget(meta) {
+    var base = { "build": { bike: 150, run: 26 }, "build+": { bike: 175, run: 30 },
+                 "peak": { bike: 200, run: 34 }, "deload": { bike: 110, run: 18 } }[meta.role];
+    var t = { bike: base.bike, run: base.run };
+    if (meta.focus === "run") { t.run = Math.round(t.run * 1.3); t.bike = Math.round(t.bike * 0.82); }
+    return t;
+  }
+
+  // Resolve a slot into a concrete session for a given week. Rotates hard
+  // sessions over a 3-week cycle so it isn't the same interval set forever.
+  function fpResolveSession(slot, meta, w) {
+    var rot = ((w % 3) + 3) % 3;
+    var dl = meta.role === "deload";
+    var runFocus = meta.focus === "run";
+
+    if (slot === "cardio-rest") return null;
+
+    if (slot === "run-quality") {
+      if (dl) return S("Run", "Run — short sharpener", "4×2 min at 5K effort, full jog recovery. Snappy, not deep.",
+        "Hard but brief", "~30 min", "Deload week — keep the legs sharp without adding fatigue.", "Hard");
+      var rq = [
+        S("Run", "Run — VO2 intervals", "6×3 min hard / 2 min jog. Reps at 3K–5K effort.", "Hard", "~50 min", "", "Hard"),
+        S("Run", "Run — hill repeats", "8–10 × 45–60 s uphill hard, jog down.", "Hard on the climb", "~45 min", "", "Hard"),
+        S("Run", "Run — threshold tempo", "2×12 min @ threshold, 3 min float between.", "Comfortably hard", "~55 min", "", "Hard")
+      ][rot];
+      rq.why = "Primary run speed session. Legs are fresh after an upper-body lift day. Volume/target paces get tuned by the adaptive engine.";
+      return rq;
+    }
+
+    if (slot === "bike-quality") {
+      if (dl) return S("Bike", "Bike — openers", "4×90 s brisk with easy spinning around them.", "Brief and light",
+        "45–60 min", "Deload — stay sharp, no depth.", "Moderate");
+      var bq = [
+        S("Bike", "Bike — VO2", "5×4 min hard / 4 min easy.", "Hard", "60–75 min", "", "Hard"),
+        S("Bike", "Bike — threshold", "3×10 min @ threshold, 5 min easy.", "Comfortably hard", "60–75 min", "", "Hard"),
+        S("Bike", "Bike — over-unders", "3 × (3×[2 min over / 2 min under] threshold).", "Hard, controlled", "70–80 min", "", "Hard")
+      ][rot];
+      bq.why = "Time-efficient bike speed work — trainer-friendly for a 21:00 start after the Pull session.";
+      return bq;
+    }
+
+    if (slot === "midweek-long") {
+      if (runFocus) {
+        if (dl) return S("Run", "Mid-week run — easy", "50–60 min relaxed Z2.", "Easy", "50–60 min", "Deload — hold frequency, drop load.", "Easy");
+        return S("Run", "Long run + tempo", "75–100 min steady, with 2×10 min at tempo in the back half (builds across the cycle).",
+          "Z2 with tempo blocks", "75–110 min", "Run-focus cycle — this is your run volume + strength-endurance anchor. The 2–3 h window gives room to build it.", "Moderate");
+      }
+      if (dl) return S("Bike", "Mid-week ride — easy", "75–90 min Z2, no structure.", "Easy", "75–90 min", "Deload — volume comes right down.", "Easy");
+      return S("Bike", "Bike endurance + sweet-spot", "2–2.5 h aerobic with 2×20 min at sweet-spot (build to 3×20 across the cycle).",
+        "Z2 base + SS blocks", "2–2.5 h", "The week's biggest bike quality-and-volume hit, in your one long mid-week window. No lift beforehand.", "Moderate");
+    }
+
+    if (slot === "easy-run") {
+      if (dl) return S("Run", "Easy run", "30–35 min very easy.", "Very easy", "30–35 min", "Deload — keep it minimal.", "Easy");
+      return S("Run", "Easy run + strides", "40–60 min Z2 + 4–6 × 20 s strides.", "Fully conversational", "40–60 min",
+        "Aerobic run volume at low stress, after an upper-body lift. Strides keep turnover without real cost.", "Easy");
+    }
+
+    if (slot === "sat-choice") {
+      if (dl) return S("Choice", "Optional — rest preferred", "Deload + Legs day + long ride tomorrow. Default to rest; very easy 20–30 min only if you feel good.",
+        "Rest / very easy", "0–30 min", "", "Easy");
+      return S("Choice", "Easy bike or run — your pick", "30–45 min easy, or rest. You choose bike or run below. Comes after the Legs session, so keep it genuinely easy.",
+        "Recovery pace", "0–45 min", "Optional recovery session. The engine leans toward rest when recovery is down or the week's load is already high.", "Easy");
+    }
+
+    if (slot === "long-ride") {
+      if (dl) return S("Bike", "Long ride — cut back", "70–90 km easy Z2 (or ~2 h if weather forces it short).", "Easy", "2–3 h",
+        "Deload — still get out, just shorter and all easy.", "Easy");
+      if (runFocus) return S("Bike", "Long ride", "90–110 km mostly Z2. Slightly shorter on a run-focus cycle so the long run leads.",
+        "Z2 endurance", "3–4 h", "Aerobic engine work. Weather permitting — golf after.", "Easy");
+      return S("Bike", "Long ride 100 km+", "100–140 km mostly Z2, with tempo blocks in the last hour later in the cycle.",
+        "Z2 endurance + late tempo", "3–5 h", "Your aerobic base builder and the biggest volume day. Weather permitting — golf after.", "Moderate");
+    }
+    return null;
+  }
+
+  function buildTrainingPlan() {
     var weeks = [];
-    var today = new Date(); var monday = new Date(today); monday.setDate(today.getDate() - ((today.getDay()+6)%7));
-    for (var w = 0; w < 4; w++) {
-      var wStart = new Date(monday); wStart.setDate(monday.getDate() + w * 7);
-      var wStartIso = wStart.toISOString().slice(0, 10);
-      var wEnd = new Date(wStart); wEnd.setDate(wStart.getDate() + 6);
-      var wEndIso = wEnd.toISOString().slice(0, 10);
-      var fixed = REAL_GARMIN_SCHEDULED
-        .filter(function(g) { return g.date >= wStartIso && g.date <= wEndIso; })
-        .map(function(g) {
-          var dow = (new Date(g.date).getDay() + 6) % 7;
-          return { type: g.sport, title: g.name, detail: "From your Garmin training calendar", day: dow, locked: true };
-        });
+    var mondayIso = fpIso(fpMonday(new Date()));
+    for (var i = 0; i < 8; i++) {                     // two full cycles ahead
+      var wStart = fpAddDays(mondayIso, i * 7);
+      var wEnd = fpAddDays(wStart, 6);
+      var meta = fpWeekMeta(wStart);
+      var vol = fpVolumeTarget(meta);
+      var days = FIXED_SCHEDULE.map(function(slot, d) {
+        var sess = fpResolveSession(slot.slot, meta, meta.weeksSince);
+        return {
+          d: d, name: slot.name, start: slot.start, cap: slot.cap, lift: slot.lift, slotKey: slot.slot,
+          session: sess,
+          satChoice: slot.slot === "sat-choice" ? null : undefined,   // "Bike" | "Run" | "Rest" | null
+          done: false, doneManual: false, autoDetected: false, autoExcluded: false,
+          matchedActivityId: null, missed: false
+        };
+      });
       weeks.push({
-        label: "Week " + (w + 1), phase: phases[w % phases.length], weekStart: wStartIso, weekEnd: wEndIso,
-        volume: volumeTargets[w % volumeTargets.length],
-        pool: pool.map(function(item, idx) { return { id: "g" + w + "-p" + idx, type: item.type, title: item.title, detail: item.detail, why: item.why, effort: item.effort, duration: item.duration, assignedDay: null }; }),
-        fixed: fixed, dayStatus: {}, dayTime: {}
+        label: "Wk " + (i + 1), weekStart: wStart, weekEnd: wEnd,
+        meta: meta, volume: vol, days: days, fixedPlan: true
       });
     }
-    return applySportFilter(weeks);
+    return weeks;
+  }
+
+  // ---- fixed-plan persistence ----
+  var FP_KEY = "training_coach_fixed_v1";
+  function fpLoad() { try { var r = localStorage.getItem(FP_KEY); return r ? JSON.parse(r) : {}; } catch (e) { return {}; } }
+  function fpSave() {
+    if (!storageAvailable) return;
+    var state = {};
+    currentPlan.forEach(function(week) {
+      if (!week.fixedPlan) return;
+      state[week.weekStart] = week.days.map(function(dy) {
+        return { satChoice: dy.satChoice, done: dy.done, doneManual: dy.doneManual,
+                 autoDetected: dy.autoDetected, autoExcluded: dy.autoExcluded,
+                 matchedActivityId: dy.matchedActivityId, missed: dy.missed };
+      });
+    });
+    try { localStorage.setItem(FP_KEY, JSON.stringify(state)); } catch (e) {}
+  }
+  function hydrateFixed(weeks) {
+    var state = fpLoad();
+    weeks.forEach(function(week) {
+      var saved = state[week.weekStart];
+      if (!saved) return;
+      saved.forEach(function(sd, i) {
+        var dy = week.days[i];
+        if (!dy) return;
+        if (dy.satChoice !== undefined) dy.satChoice = sd.satChoice != null ? sd.satChoice : null;
+        dy.done = !!sd.done; dy.doneManual = !!sd.doneManual;
+        dy.autoDetected = !!sd.autoDetected; dy.autoExcluded = !!sd.autoExcluded;
+        dy.matchedActivityId = sd.matchedActivityId || null; dy.missed = !!sd.missed;
+      });
+    });
+    return weeks;
+  }
+
+  // Match each planned cardio day to a real Garmin activity on that exact
+  // date (the day is fixed, so this is more precise than the old pool logic).
+  function fpProcessCompletion(week) {
+    var todayIso = fpIso(new Date());
+    var sourceActs = liveMode ? currentWeekActivities : REAL_ACTIVITIES;
+    var claimed = {};
+    week.days.forEach(function(dy) { if (dy.matchedActivityId) claimed[dy.matchedActivityId] = true; });
+
+    week.days.forEach(function(dy) {
+      var wantType = fpDayCardioType(dy);              // "running" | "cycling" | null
+      dy.missed = false;
+      if (!wantType) { return; }
+      var dayIso = fpAddDays(week.weekStart, dy.d);
+      if (dy.doneManual) { dy.done = true; return; }
+      if (!dy.autoExcluded) {
+        var hit = (sourceActs || []).filter(function(a) {
+          return a.type === wantType && a.startTimeLocal && a.startTimeLocal.slice(0,10) === dayIso && !claimed[a.activityId];
+        })[0];
+        if (hit) {
+          dy.done = true; dy.autoDetected = true; dy.matchedActivityId = hit.activityId; claimed[hit.activityId] = true;
+        } else if (!dy.done) {
+          dy.autoDetected = false; dy.matchedActivityId = null;
+        }
+      }
+      if (!dy.done && dayIso < todayIso) dy.missed = true;
+    });
+  }
+
+  function fpDayCardioType(dy) {
+    if (!dy.session) return null;
+    var t = dy.session.type;
+    if (t === "Choice") {
+      if (dy.satChoice === "Bike") return "cycling";
+      if (dy.satChoice === "Run") return "running";
+      return null;                                     // Rest or undecided
+    }
+    if (t === "Run" && activeSports.Run) return "running";
+    if (t === "Bike" && activeSports.Bike) return "cycling";
+    return null;
   }
 
   function applySportFilter(weeks) {
@@ -1933,13 +2107,13 @@
     return weeks;
   }
 
-  var currentPlan = hydratePlan(activeRace === "palma" ? buildPalmaPlan() : buildGeneralPlan(), activeRace);
+  var currentPlan = activeRace === "palma" ? hydratePlan(buildPalmaPlan(), "palma") : hydrateFixed(buildTrainingPlan());
   var activeWeekIdx = 0;
 
   document.getElementById("race-select").addEventListener("change", function(e) {
     activeRace = e.target.value;
     activeWeekIdx = 0;
-    currentPlan = hydratePlan(activeRace === "palma" ? buildPalmaPlan() : buildGeneralPlan(), activeRace);
+    currentPlan = activeRace === "palma" ? hydratePlan(buildPalmaPlan(), "palma") : hydrateFixed(buildTrainingPlan());
     renderRaceCoach();
   });
 
@@ -2066,7 +2240,180 @@
     try { localStorage.setItem("race_coach_race_notes", val); } catch(e) {}
   }
 
+  // ============================================================
+  // FIXED SCHEDULE RENDER  (general / no-race mode)
+  // ============================================================
+  function fpRoleLabel(role) {
+    return { "build": "Build", "build+": "Build +", "peak": "Peak", "deload": "Deload" }[role] || role;
+  }
+  function fpRoleBlurb(meta) {
+    var f = meta.focus === "run" ? "run-focused" : "bike-focused";
+    return {
+      "build": "First week of the block — settle in, moderate load. This cycle is " + f + ".",
+      "build+": "Load steps up from last week. " + (meta.focus === "run" ? "Run" : "Bike") + " is the priority this cycle.",
+      "peak": "Highest load of the 4-week block. Hold form, protect recovery between sessions.",
+      "deload": "Recovery week — volume drops, a little sharpness kept. Depth is set by how the block went (engine, coming soon)."
+    }[meta.role];
+  }
+
+  function renderFixedPlan() {
+    var week = currentPlan[activeWeekIdx];
+    if (!week || !week.fixedPlan) { document.getElementById("race-content").innerHTML = ""; return; }
+    fpProcessCompletion(week);
+
+    var meta = week.meta;
+    var todayIso = fpIso(new Date());
+    var isCurrentWeek = week.weekStart <= todayIso && week.weekEnd >= todayIso;
+    var todayD = isCurrentWeek ? (new Date().getDay() + 6) % 7 : -1;
+
+    // ---- header ----
+    var headerHtml =
+      '<div class="card"><div class="race-info-card">' +
+        '<div class="race-info-main">' +
+          '<div class="race-name">Cycle ' + meta.cycle + ' &middot; Week ' + meta.weekInCycle + ' of 4</div>' +
+          '<div class="race-meta">' + fpRoleLabel(meta.role) + ' week &middot; ' + (meta.focus === "run" ? "run" : "bike") + '-focus cycle<br>' +
+            week.weekStart + ' → ' + week.weekEnd + '</div>' +
+          '<p style="font-size:12.5px; color:var(--muted); line-height:1.55; margin:10px 0 0; max-width:520px;">' + fpRoleBlurb(meta) + '</p>' +
+        '</div>' +
+        '<div style="text-align:center;"><div class="race-countdown-big">' + fpRoleLabel(meta.role) + '</div>' +
+          '<div style="font-family:\'IBM Plex Mono\',monospace; font-size:10px; color:var(--muted); text-transform:uppercase;">4-week block</div></div>' +
+      '</div></div>';
+
+    // ---- week tabs (block navigator) ----
+    var tabsHtml = currentPlan.map(function(w, i) {
+      var cur = w.weekStart <= todayIso && w.weekEnd >= todayIso;
+      return '<div class="week-tab ' + (i === activeWeekIdx ? "active" : "") + '" onclick="fpSwitchWeek(' + i + ')">' +
+        w.label + (cur ? ' •' : '') + '<span class="phase">' + fpRoleLabel(w.meta.role) + '</span></div>';
+    }).join("");
+    var blockCardHtml = '<div class="card"><div class="card-title">Training blocks — rolling 4-week cycle</div>' +
+      '<div class="week-tabs">' + tabsHtml + '</div></div>';
+
+    // ---- provisional volume ----
+    var actuals = computeWeekActuals(week);
+    var volHtml = '<div class="card"><div class="card-title">This week\'s volume — provisional</div>' +
+      '<div style="font-size:11.5px; color:var(--muted); margin-bottom:12px; padding:8px 10px; background:var(--surface-2); border-radius:6px;">' +
+        'Default targets for a ' + fpRoleLabel(meta.role) + ' week on a ' + meta.focus + '-focus cycle. The adaptive engine (next build step) will replace these with numbers calculated from your last ~12 weeks of Garmin data, recovery trend, and how past blocks went.</div>' +
+      progressBar("Bike", actuals.bikeKm, week.volume.bike, "km", "var(--z4)") +
+      progressBar("Run", actuals.runKm, week.volume.run, "km", "var(--z2)") +
+      (actuals.brickKm > 0 ? '<div style="font-size:11.5px; color:var(--muted-2); margin-top:8px;">+ ' + fmtKm(actuals.brickKm) + ' from a brick/multisport activity, not split into either bar.</div>' : '') +
+    '</div>';
+
+    // ---- the fixed weekly grid ----
+    var gridHtml = "";
+    for (var d = 0; d < 7; d++) {
+      var dy = week.days[d];
+      var dayIso = fpAddDays(week.weekStart, d);
+      var isToday = d === todayD;
+      var chips = "";
+
+      if (dy.lift) {
+        chips += '<div class="cal-chip locked"><span class="ctype" style="color:var(--muted);">Strength</span>' +
+          '<span class="ctitle">' + dy.lift + '</span><span class="lock-tag">fixed</span></div>';
+      }
+
+      if (dy.slotKey === "cardio-rest") {
+        chips += '<div style="font-size:10.5px; color:var(--muted-2); margin-top:4px; padding:4px 6px; background:var(--surface-2); border-radius:4px;">Cardio rest — social evening</div>';
+      } else if (dy.slotKey === "sat-choice") {
+        var pick = dy.satChoice;
+        chips += '<div style="display:flex; gap:4px; margin-top:4px; flex-wrap:wrap;">' +
+          ['Bike', 'Run', 'Rest'].map(function(opt) {
+            return '<button class="' + (pick === opt ? "active-status" : "") + '" style="font-size:9.5px; padding:3px 7px;" onclick="fpSetSat(' + d + ',\'' + opt + '\')">' + opt + '</button>';
+          }).join("") + '</div>';
+        if (pick && pick !== "Rest") {
+          var scls = dy.missed ? "missed-chip" : (dy.done ? "done-chip" : "");
+          chips += '<div class="cal-chip ' + scls + '" style="cursor:pointer;" onclick="fpOpenDetail(' + activeWeekIdx + ',' + d + ')">' +
+            '<span class="ctype" style="color:' + workoutTypeColor[pick] + ';">' + pick + (dy.done ? " ✓" : "") + (dy.missed ? " ✗" : "") + '</span>' +
+            '<span class="ctitle">Easy ' + pick.toLowerCase() + '</span></div>';
+        }
+      } else if (dy.session) {
+        var cls = dy.missed ? "missed-chip" : (dy.done ? "done-chip" : "");
+        var col = workoutTypeColor[dy.session.type] || "var(--muted)";
+        chips += '<div class="cal-chip ' + cls + '" style="cursor:pointer;" onclick="fpOpenDetail(' + activeWeekIdx + ',' + d + ')">' +
+          '<span class="ctype" style="color:' + col + ';">' + dy.session.type + (dy.done ? " ✓" : "") + (dy.missed ? " ✗" : "") + '</span>' +
+          '<span class="ctitle">' + dy.session.title.replace(/^(Run|Bike) — /, "") + '</span></div>';
+      }
+
+      gridHtml += '<div class="cal-day ' + (dy.slotKey === "cardio-rest" ? "rest" : "") + '" style="' + (isToday ? "border-color:var(--z2);" : "") + '">' +
+        '<div class="dow">' + dy.name + (isToday ? ' · today' : '') + '</div>' +
+        '<div style="font-family:\'IBM Plex Mono\',monospace; font-size:9px; color:var(--muted-2); margin-bottom:4px;">' +
+          (dy.start ? dy.start : '—') + (dy.cap ? ' · ' + dy.cap : '') + '</div>' +
+        chips +
+      '</div>';
+    }
+    var gridCardHtml = '<div class="card"><div class="card-title">Weekly schedule — fixed slots</div>' +
+      '<div style="font-size:11.5px; color:var(--muted-2); margin-bottom:10px;">Strength runs first each day; cardio is in the evening slot. Tap a cardio session for detail. Mon/Tue/Thu are capped short — Wed and Sun carry the volume.</div>' +
+      '<div class="cal-week">' + gridHtml + '</div></div>';
+
+    // ---- weekly review ----
+    var planned = 0, done = 0, missed = 0;
+    week.days.forEach(function(dy) {
+      if (fpDayCardioType(dy)) { planned++; if (dy.done) done++; else if (dy.missed) missed++; }
+    });
+    var upcoming = planned - done - missed;
+    var reviewHtml = '<div class="card"><div class="card-title">This week</div>' +
+      '<div class="summary-row">' +
+        '<div class="stat"><div class="label">Cardio done</div><div class="value" style="color:var(--z2);">' + done + '</div></div>' +
+        '<div class="stat"><div class="label">Missed</div><div class="value" style="color:' + (missed > 0 ? "var(--z5)" : "var(--text)") + ';">' + missed + '</div></div>' +
+        '<div class="stat"><div class="label">Upcoming</div><div class="value">' + upcoming + '</div></div>' +
+        '<div class="stat"><div class="label">Planned</div><div class="value">' + planned + '</div></div>' +
+      '</div></div>';
+
+    document.getElementById("race-content").innerHTML =
+      headerHtml + blockCardHtml + volHtml + gridCardHtml + reviewHtml;
+    fpSave();
+  }
+
+  function fpSwitchWeek(i) { activeWeekIdx = i; renderFixedPlan(); }
+  function fpSetSat(d, choice) {
+    var dy = currentPlan[activeWeekIdx].days[d];
+    dy.satChoice = (dy.satChoice === choice) ? null : choice;
+    if (dy.satChoice === "Rest" || dy.satChoice === null) { dy.done = false; dy.doneManual = false; dy.autoDetected = false; dy.matchedActivityId = null; dy.missed = false; }
+    renderFixedPlan();
+  }
+  function fpToggleDone(weekIdx, d) {
+    var dy = currentPlan[weekIdx].days[d];
+    dy.doneManual = !dy.doneManual;
+    dy.done = dy.doneManual;
+    if (!dy.doneManual) { dy.autoExcluded = true; dy.autoDetected = false; dy.matchedActivityId = null; }
+    else { dy.autoExcluded = false; dy.missed = false; }
+    closeOptionModal();
+    renderFixedPlan();
+  }
+  function fpOpenDetail(weekIdx, d) {
+    var week = currentPlan[weekIdx];
+    var dy = week.days[d];
+    var sess = dy.session;
+    if (dy.slotKey === "sat-choice" && dy.satChoice && dy.satChoice !== "Rest") {
+      sess = S(dy.satChoice, "Easy " + dy.satChoice.toLowerCase(),
+        "30–45 min genuinely easy, after the Legs session. Recovery pace only.", "Recovery / Z1", "30–45 min",
+        "Optional recovery — skip it entirely if recovery is low or the week's load is already high.", "Easy");
+    }
+    if (!sess) return;
+    var dateStr = new Date(fpAddDays(week.weekStart, d) + "T00:00:00").toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' });
+    var col = workoutTypeColor[sess.type] || "var(--muted)";
+    var banner = dy.autoDetected
+      ? '<div class="modal-coach" style="border-left-color:var(--z2);"><span class="modal-coach-icon">✓</span><div><span class="modal-coach-label" style="color:var(--z2);">Auto-detected</span>Matched to a Garmin activity on this day and marked complete.</div></div>'
+      : dy.done
+      ? '<div class="modal-coach" style="border-left-color:var(--z2);"><span class="modal-coach-icon">✓</span><div><span class="modal-coach-label" style="color:var(--z2);">Marked done</span>You checked this off manually.</div></div>'
+      : dy.missed
+      ? '<div class="modal-coach" style="border-left-color:var(--z5);"><span class="modal-coach-icon">⚠️</span><div><span class="modal-coach-label" style="color:var(--z5);">Missed</span>This day has passed with no matching Garmin activity.</div></div>'
+      : "";
+    document.getElementById("option-modal-card").innerHTML =
+      '<button class="modal-close" onclick="closeOptionModal()">&times;</button>' + banner +
+      '<div class="modal-title" style="color:' + col + ';">' + dy.name + ' · ' + dateStr + (dy.lift ? ' · after ' + dy.lift : '') + '</div>' +
+      '<div class="modal-value" style="font-size:22px; margin-bottom:8px;">' + sess.title + '</div>' +
+      '<p class="modal-explanation" style="margin-bottom:14px;">' + sess.detail + '</p>' +
+      (sess.why ? '<div class="modal-breakdown-title">Why this session</div><p class="modal-explanation" style="margin-bottom:14px;">' + sess.why + '</p>' : '') +
+      '<div class="modal-breakdown-row"><span class="k">Effort</span><span class="v">' + (sess.effort || "—") + '</span></div>' +
+      '<div class="modal-breakdown-row"><span class="k">Duration</span><span class="v">' + (sess.duration || "—") + '</span></div>' +
+      '<div class="modal-breakdown-row"><span class="k">Slot</span><span class="v">' + (dy.start || "—") + (dy.cap ? ' · ' + dy.cap : '') + '</span></div>' +
+      '<button class="notif-btn" style="width:100%; margin:14px 0 0; padding:10px; border-color:' + (dy.done ? "var(--z2)" : "var(--line)") + '; color:' + (dy.done ? "var(--z2)" : "var(--muted)") + ';" onclick="fpToggleDone(' + weekIdx + ',' + d + ')">' +
+        (dy.done ? "✓ Done — tap to undo" : "Mark as done") + '</button>';
+    document.getElementById("option-modal").classList.add("open");
+  }
+
   function renderRaceCoach() {
+    if (activeRace !== "palma") { renderFixedPlan(); return; }
     var isRace = activeRace === "palma";
     var race = RACE_DATA.palma;
     var days = isRace ? daysToRace(race.raceDate) : null;
