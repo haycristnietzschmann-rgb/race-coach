@@ -1,4 +1,4 @@
-const CACHE = "training-coach-v2";
+const CACHE = "training-coach-v3";
 const SHELL = ["/", "/index.html", "/manifest.json"];
 
 self.addEventListener("install", (event) => {
@@ -40,7 +40,22 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
 
   if (url.pathname.startsWith("/api/")) {
-    event.respondWith(fetch(event.request).catch(() => caches.match(event.request)));
+    // Network-first. For the read-only plan/fitness/sleep GETs, keep a copy so
+    // the last-good version is viewable offline.
+    const cacheable =
+      event.request.method === "GET" &&
+      /\/api\/(plan\/week|fitness|sleep)(\?|$)/.test(url.pathname + url.search);
+    event.respondWith(
+      fetch(event.request)
+        .then((res) => {
+          if (cacheable && res && res.ok) {
+            const copy = res.clone();
+            caches.open(CACHE).then((cache) => cache.put(event.request, copy));
+          }
+          return res;
+        })
+        .catch(() => caches.match(event.request))
+    );
     return;
   }
 

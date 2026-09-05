@@ -569,6 +569,12 @@
         </div>
         <button class="notif-btn" style="margin-top:12px; width:auto; display:inline-block; padding:9px 16px;" onclick="refreshData()">&#8635; Refresh now</button>
       </div>
+
+      <div class="card">
+        <div class="card-title">Export</div>
+        <p style="font-size:12.5px; color:var(--muted); margin:0 0 12px;">Download everything this app has stored locally — your schedule, session feel/RPE, journal, race archive, settings — as one JSON file.</p>
+        <button class="notif-btn" style="width:auto; padding:9px 16px;" onclick="exportData()">&#8681; Export my data (JSON)</button>
+      </div>
     </section>
   </main>
 
@@ -651,6 +657,22 @@
       statusEl.style.color = "var(--z5)";
       liveMode = false;
     });
+  }
+
+  function exportData() {
+    var keys = ["training_coach_fixed_v1", "race_coach_settings_v1", "race_coach_journal_v1",
+                "race_coach_archive_v1", "race_coach_plan_palma_v1", "race_coach_plan_general_v1",
+                "race_coach_race_notes"];
+    var dump = { exportedAt: new Date().toISOString(), app: "Training Coach", data: {} };
+    keys.forEach(function(k){ try { var v = localStorage.getItem(k); if (v != null) dump.data[k] = JSON.parse(v); } catch (e) { dump.data[k] = localStorage.getItem(k); } });
+    if (lastFitness) dump.fitness_snapshot = lastFitness;
+    if (lastSleep) dump.sleep_snapshot = lastSleep;
+    var blob = new Blob([JSON.stringify(dump, null, 2)], { type: "application/json" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "training-coach-export-" + new Date().toISOString().slice(0, 10) + ".json";
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
   }
 
   function saveHomeLocation() {
@@ -2816,8 +2838,10 @@
     var fi = fitSeries(data.fitness_index_series, "index");
     var fiCard = '<div class="card"><div class="card-title">Fitness trend — all factors combined</div>' + blockLine +
       (fitHas(fi)
-        ? detailedChart(fi, "var(--z2)", "", "Fitness index") +
-          '<div style="font-size:11px; color:var(--muted); margin-top:6px;">0–100 blend of VO2 max, aerobic efficiency (pace at HR), resting HR and endurance score, each scaled to its own recent range. Higher = fitter. Now ≈ ' + (fitLast(fi) != null ? fitLast(fi) : "—") + '.</div>'
+        ? '<div onclick="openFitnessIndexModal()" style="cursor:pointer; border:1px solid var(--line); border-radius:8px; padding:8px 6px 2px;" onmouseover="this.style.borderColor=\'var(--z2)\'" onmouseout="this.style.borderColor=\'var(--line)\'">' +
+            detailedChart(fi, "var(--z2)", "", "Fitness index") +
+            '<div style="text-align:center; font-size:10.5px; color:var(--z2); padding:4px 0 6px;">Tap for what\'s driving it &rsaquo;</div></div>' +
+          '<div style="font-size:11px; color:var(--muted); margin-top:6px;">0–100 blend of VO2 max, aerobic efficiency, resting HR and endurance score. Now ≈ ' + (fitLast(fi) != null ? fitLast(fi) : "—") + '.</div>'
         : '<p style="font-size:11.5px; color:var(--muted-2);">Builds once there are a few weeks of VO2 / pace / resting-HR history to blend.</p>') +
     '</div>';
 
@@ -3007,6 +3031,37 @@
       '<p class="modal-explanation" style="margin:12px 0 14px;">' + (proj.rationale || "") + '</p>' +
       '<div class="modal-breakdown-title">Recent weekly readings (running)</div>' + recentRows +
       '<p class="modal-explanation" style="margin-top:14px; font-size:11.5px; color:var(--muted-2);">This is a trend-based estimate. When the adaptive planner recalculates your week it refines this using your training load, recovery, and how past blocks went.</p>';
+    document.getElementById("option-modal").classList.add("open");
+  }
+
+  function openFitnessIndexModal() {
+    var d = lastFitness || {};
+    function delta(arr, key, invert, unit) {
+      var v = (arr || []).map(function(p){ return p && p[key]; }).filter(function(x){ return typeof x === "number"; });
+      if (v.length < 2) return null;
+      var ch = v[v.length - 1] - v[0];
+      var better = invert ? ch < 0 : ch > 0;
+      return { change: ch, better: better, from: v[0], to: v[v.length - 1], unit: unit || "" };
+    }
+    var rows = [
+      ["VO2 max", delta(d.vo2_series, "running", false, "")],
+      ["Aerobic efficiency (pace @ HR)", delta(d.pace_at_hr_series, "sec_per_km", true, " s/km")],
+      ["Resting HR", delta(d.rhr_series, "bpm", true, " bpm")],
+      ["Endurance score", delta((d.endurance_score && d.endurance_score.enduranceScoreDTO && d.endurance_score.enduranceScoreDTO.groupList) || [], "overallScore", false, "")]
+    ];
+    var body = rows.map(function(r){
+      if (!r[1]) return '<div class="modal-breakdown-row"><span class="k">' + r[0] + '</span><span class="v" style="color:var(--muted-2);">no history</span></div>';
+      var s = r[1], sign = s.change > 0 ? "+" : "";
+      return '<div class="modal-breakdown-row"><span class="k">' + r[0] + '</span>' +
+        '<span class="v" style="color:' + (s.better ? "var(--z2)" : "var(--z5)") + ';">' +
+        Math.round(s.from * 10) / 10 + ' → ' + Math.round(s.to * 10) / 10 + ' (' + sign + (Math.round(s.change * 10) / 10) + s.unit + (s.better ? ", better" : ", worse") + ')</span></div>';
+    }).join("");
+    document.getElementById("option-modal-card").innerHTML =
+      '<button class="modal-close" onclick="closeOptionModal()">&times;</button>' +
+      '<div class="modal-title" style="color:var(--z2);">Fitness trend — what\'s driving it</div>' +
+      '<p class="modal-explanation" style="margin:6px 0 12px;">Each signal is scaled to its own recent range, then averaged. Change over the window:</p>' +
+      body +
+      '<p class="modal-explanation" style="margin-top:14px; font-size:11.5px; color:var(--muted-2);">Green = moving the right way. If the index is flat while VO2 climbs, something else (efficiency, resting HR) is dragging — usually fatigue or a volume spike.</p>';
     document.getElementById("option-modal").classList.add("open");
   }
 
