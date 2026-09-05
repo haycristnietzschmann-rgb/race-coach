@@ -2362,6 +2362,18 @@
       .finally(function(){ fpEngineBusy = false; renderFixedPlan(); });
   }
 
+  var fpGarminSync = {};        // weekStart -> reconciliation result
+  var fpGarminSyncTried = {};
+  function fpLoadGarminSync(ws, force) {
+    if (!liveMode) return;
+    if (!force && fpGarminSyncTried[ws]) return;
+    fpGarminSyncTried[ws] = true;
+    fetch(settings.apiBase + "/api/garmin/scheduled?week_start=" + ws)
+      .then(function(r){ if(!r.ok) throw new Error("bad"); return r.json(); })
+      .then(function(res){ fpGarminSync[ws] = res; renderFixedPlan(); })
+      .catch(function(){});
+  }
+
   var fpPushState = {};   // "wk:<weekStart>" or "d:<weekStart>:<d>" -> "sending"|"done"|"error: ..."
   function fpPushWeek() {
     if (!liveMode) return;
@@ -2409,6 +2421,7 @@
     if (week.weekStart === curMonday || week.weekStart === fpAddDays(curMonday, 7)) fpLoadEngine(week.weekStart);
     var enginePlan = fpEnginePlans[week.weekStart] || null;
     var adjustRes = fpAdjust[week.weekStart] || null;
+    if (week.weekStart === curMonday && enginePlan) fpLoadGarminSync(week.weekStart);
 
     var meta = week.meta;
     var todayIso = fpIso(new Date());
@@ -2584,8 +2597,23 @@
       '</div>';
     }
 
+    // ---- Garmin calendar sync (current week) ----
+    var gsHtml = "";
+    var gs = fpGarminSync[week.weekStart];
+    if (gs && liveMode && isCurrentWeek && !gs.error) {
+      var mism = gs.mismatched || [], gonly = gs.garmin_only || [], miss = gs.missing_on_garmin || [];
+      var clean = !mism.length && !gonly.length && !miss.length;
+      gsHtml = '<div class="card" style="' + (clean ? '' : 'border-color:var(--z4);') + '"><div class="card-title">Garmin calendar</div>' +
+        '<p style="font-size:12.5px; color:' + (clean ? "var(--z2)" : "var(--muted)") + '; margin:0 0 ' + (clean ? '0' : '10px') + ';">' + (gs.verdict || "") + '</p>' +
+        mism.map(function(m){ return '<div style="font-size:11.5px; margin-top:4px;"><span style="color:var(--z4);">≠</span> ' + m.date + ' — plan: <strong>' + (m.plan || "") + '</strong>, on Garmin: ' + (m.on_garmin || []).join(", ") + '</div>'; }).join("") +
+        miss.map(function(m){ return '<div style="font-size:11.5px; color:var(--muted-2); margin-top:4px;">Not on Garmin yet — ' + m.date + ' ' + (m.title || "") + '</div>'; }).join("") +
+        gonly.map(function(g){ return '<div style="font-size:11.5px; color:var(--muted-2); margin-top:4px;">Added on Garmin — ' + g.date + ': ' + (g.titles || []).join(", ") + ' (kept; the app plan is the source of truth)</div>'; }).join("") +
+        (clean ? '' : '<button class="notif-btn" style="width:auto; padding:8px 14px; margin-top:10px;" onclick="fpPushWeek()">↻ Re-push week to match plan</button>') +
+      '</div>';
+    }
+
     document.getElementById("race-content").innerHTML =
-      deloadHtml + headerHtml + todayCardHtml + blockCardHtml + brHtml + volHtml + gridCardHtml + reviewHtml + adjustHtml;
+      deloadHtml + headerHtml + todayCardHtml + blockCardHtml + brHtml + volHtml + gridCardHtml + reviewHtml + adjustHtml + gsHtml;
     fpSave();
   }
 

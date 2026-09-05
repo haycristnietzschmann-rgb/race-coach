@@ -21,7 +21,7 @@ from planner import (
     assemble_context, generate_week_plan, adjust_week,
     block_meta, project_vo2, build_fitness, build_sleep,
 )
-from garmin_writer import push_workout, push_week as gc_push_week
+from garmin_writer import push_workout, push_week as gc_push_week, reconcile_week
 
 # Training goal fed to the Claude coaching prompts (morning brief + Ask Coach).
 # Falls back to the legacy RACE_GOAL env var so existing Render configs keep
@@ -511,3 +511,11 @@ def garmin_push_week(body: dict = None):
         _plan_state["weeks"][monday] = plan
         _save_plan_state(_plan_state)
     return gc_push_week(monday, plan)
+
+
+@app.get("/api/garmin/scheduled")
+def garmin_scheduled(week_start: str = None):
+    """What's on the Garmin calendar this week vs the app plan (app plan wins)."""
+    monday = _plan_monday(week_start)
+    plan = _plan_state["weeks"].get(monday) or {}
+    return reconcile_week(monday, plan)

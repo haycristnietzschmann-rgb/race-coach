@@ -217,6 +217,102 @@ def _api_post(path: str, payload):
     return resp
 
 
+def _api_get(path: str):
+    api = get_client().api
+    try:
+        return api.connectapi(path)
+    except Exception:
+        resp = api.garth.connectapi(path)
+        return resp.json() if hasattr(resp, "json") else resp
+
+
+def list_scheduled(start_iso: str, end_iso: str) -> list[dict]:
+    """Workouts already on the Garmin calendar between two dates. Reads
+    calendar-service month by month; best-effort."""
+    if os.environ.get("GARMIN_FIXTURE_MODE"):
+        return []
+    start = dt.date.fromisoformat(start_iso)
+    end = dt.date.fromisoformat(end_iso)
+    seen, out = set(), []
+    d = start.replace(day=1)
+    while d <= end:
+        key = (d.year, d.month)
+        if key not in seen:
+            seen.add(key)
+            try:
+                # calendar-service months are 0-indexed
+                data = _api_get(f"/calendar-service/year/{d.year}/month/{d.month - 1}") or {}
+                for item in (data.get("calendarItems") or []):
+                    if not isinstance(item, dict):
+                        continue
+                    if (item.get("itemType") or "").lower() not in ("workout", "scheduledworkout"):
+                        continue
+                    day = (item.get("date") or "")[:10]
+                    if start_iso <= day <= end_iso:
+                        out.append({
+                            "date": day,
+                            "title": item.get("title") or item.get("workoutName"),
+                            "workout_id": item.get("workoutId") or item.get("id"),
+                            "sport": (item.get("sportTypeKey") or item.get("sportType") or "").lower(),
+                        })
+            except Exception:
+                pass
+        d = (d.replace(day=28) + dt.timedelta(days=7)).replace(day=1)
+    return out
+
+
+_DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def reconcile_week(week_start: str, plan: dict) -> dict:
+    """Compare what's on Garmin's calendar this week against the app plan.
+    App plan wins: mismatches and Garmin-only items are reported, not merged
+    over the plan."""
+    try:
+        monday = dt.date.fromisoformat(week_start)
+    except Exception:
+        return {"error": "bad week_start"}
+    end = (monday + dt.timedelta(days=6)).isoformat()
+    garmin_items = list_scheduled(week_start, end)
+    by_date = {}
+    for g in garmin_items:
+        by_date.setdefault(g["date"], []).append(g)
+
+    planned_dates = {}
+    for s in (plan or {}).get("sessions", []):
+        try:
+            i = _DAY_NAMES.index(s.get("day"))
+        except ValueError:
+            continue
+        planned_dates[(monday + dt.timedelta(days=i)).isoformat()] = s
+
+    in_sync, mismatched, garmin_only, missing_on_garmin = [], [], [], []
+    for date, s in planned_dates.items():
+        gs = by_date.get(date, [])
+        want = f"{s.get('day')} — {s.get('title', '')}".strip(" —").lower()
+        if not gs:
+            missing_on_garmin.append({"date": date, "title": s.get("title")})
+        elif any((g.get("title") or "").lower().strip() == want for g in gs):
+            in_sync.append({"date": date, "title": s.get("title")})
+        else:
+            mismatched.append({"date": date, "plan": s.get("title"),
+                               "on_garmin": [g.get("title") for g in gs]})
+    for date, gs in by_date.items():
+        if date not in planned_dates:
+            garmin_only.append({"date": date, "titles": [g.get("title") for g in gs]})
+
+    return {
+        "week_start": week_start,
+        "garmin_items": garmin_items,
+        "in_sync": in_sync,
+        "mismatched": mismatched,          # app plan wins — re-push to fix
+        "garmin_only": garmin_only,        # you added these on Garmin
+        "missing_on_garmin": missing_on_garmin,
+        "verdict": ("in sync" if not mismatched and not missing_on_garmin
+                    else "plan and Garmin differ — re-push the week to match the plan"),
+    }
+
+
 _SPORT_ID = {"Run": "running", "Bike": "cycling", "running": "running", "cycling": "cycling"}
 
 
