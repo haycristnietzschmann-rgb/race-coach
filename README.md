@@ -1,4 +1,4 @@
-# Race Coach
+# Training Coach
 
 A personal training dashboard: your real Garmin data, a weekly workout list
 you schedule yourself, automatic detection of what you actually did, and a
@@ -11,7 +11,7 @@ This app has two independent parts, and it's important to understand what
 each one does:
 
 **`frontend/index.html`** — a single, self-contained file with everything:
-Overview, Training, Race Coach, Journal, Race Archive, Ask Coach, Settings.
+Overview, Training, Training Coach, Journal, Race Archive, Ask Coach, Settings.
 It currently runs on:
 - A **real Garmin data snapshot** pulled once and baked into the file
   (sleep, HRV, training status, recent activities, HR zones — all real
@@ -41,7 +41,7 @@ race-coach/
 │   ├── main.py              FastAPI app: dashboard, overview, training,
 │   │                        morning-report, push subscription endpoints
 │   ├── garmin_client.py     Wraps the unofficial garminconnect library
-│   ├── coach.py             Daily race-focused coaching brief (Claude)
+│   ├── coach.py             Daily goal-focused coaching brief (Claude)
 │   ├── morning_report.py    Broader daily briefing (Claude)
 │   ├── push.py              Web push notification helper
 │   ├── requirements.txt
@@ -64,13 +64,14 @@ race-coach/
 - **Training** — Monday-Sunday calendar (expandable to a full month view),
   clickable real activities with full stats (pace/speed/HR/elevation),
   real HR-zone distribution, and a Bike/Run/Swim volume breakdown chart
-- **Race Coach** — real race info pulled for Port de Palma Triathlon, a
-  weekly workout *list* (not a fixed schedule) you assign to whichever day
-  you want, a coach suggestion that's explicitly optional, volume progress
-  bars with a strain target, a Weekly Review (completed/missed/upcoming),
-  automatic detection that crosses off workouts when a matching real
-  Garmin activity is found, missed-workout flagging, and a race switcher
-  (Palma race plan or General Fitness mode with no race)
+- **Training Coach** — a weekly workout *list* (not a fixed schedule) you
+  assign to whichever day you want, a coach suggestion that's explicitly
+  optional, volume progress bars with a strain target, a Weekly Review
+  (completed/missed/upcoming), automatic detection that crosses off
+  workouts when a matching real Garmin activity is found, missed-workout
+  flagging, and a plan switcher — defaults to general training (get
+  faster at run + bike, no race date) with an optional Port de Palma
+  Triathlon race block still selectable
 - **Journal** — daily tags (alcohol, travel, poor sleep, stress, etc.) plus
   notes, saved locally
 - **Race Archive** — log past races manually; empty until you add one

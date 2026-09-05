@@ -18,11 +18,23 @@ from coach import generate_brief, answer_chat
 from morning_report import generate_morning_report
 from push import add_subscription, send_notification_to_all
 
-RACE_NAME = os.environ.get("RACE_NAME", "Race Day")
-RACE_DATE = os.environ.get("RACE_DATE")  # YYYY-MM-DD
-RACE_GOAL = os.environ.get("RACE_GOAL", "Finish strong and healthy.")
+# Training goal fed to the Claude coaching prompts (morning brief + Ask Coach).
+# Falls back to the legacy RACE_GOAL env var so existing Render configs keep
+# working until they're renamed to TRAINING_GOAL.
+TRAINING_GOAL = os.environ.get(
+    "TRAINING_GOAL",
+    os.environ.get(
+        "RACE_GOAL",
+        "Get genuinely faster at running and cycling while holding solid weekly distance.",
+    ),
+)
 
-app = FastAPI(title="Race Coach API")
+# Optional — only set these when training for a specific race. Consumed by
+# /api/dashboard's "race" block; left unset the app runs in general-training mode.
+RACE_NAME = os.environ.get("RACE_NAME")
+RACE_DATE = os.environ.get("RACE_DATE")  # YYYY-MM-DD
+
+app = FastAPI(title="Training Coach API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -81,17 +93,17 @@ def dashboard(refresh: bool = False):
     if _cache["date"] != today or refresh:
         client = get_client()
         snapshot = client.snapshot()
-        brief = generate_brief(snapshot, RACE_GOAL) if need_new_brief else _cache["brief"]
+        brief = generate_brief(snapshot, TRAINING_GOAL) if need_new_brief else _cache["brief"]
         _cache.update(date=today, snapshot=snapshot, brief=brief)
         _persisted.update(brief_date=today, brief=brief, snapshot=snapshot)
         _save_persisted_cache(_persisted)
 
     return {
+        "training_goal": TRAINING_GOAL,
         "race": {
             "name": RACE_NAME,
             "date": RACE_DATE,
             "days_to_race": _days_to_race(),
-            "goal": RACE_GOAL,
         },
         "snapshot": _cache["snapshot"],
         "coach_brief": _cache["brief"],
@@ -189,7 +201,7 @@ def chat(body: dict):
     if not history and cache_key in _chat_cache:
         return {"reply": _chat_cache[cache_key]}
     snapshot = _get_cached_snapshot()
-    reply = answer_chat(message, snapshot, RACE_GOAL, history)
+    reply = answer_chat(message, snapshot, TRAINING_GOAL, history)
     if not history:
         _chat_cache[cache_key] = reply
         # keep only today's entries so this doesn't grow unbounded over time

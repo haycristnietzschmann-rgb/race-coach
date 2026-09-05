@@ -1,7 +1,7 @@
 """
 Generates the daily "morning report" — a broader daily health/training
 summary shown at the top of the Overview tab and pushed as a notification.
-Distinct from coach.py's race-focused brief: this one covers recovery,
+Distinct from coach.py's goal-focused brief: this one covers recovery,
 sleep quality, and a general recommendation for the day.
 """
 import os
@@ -12,7 +12,7 @@ from coach import summarize_snapshot
 client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 SYSTEM_PROMPT = """You write a short "good morning" briefing for one athlete, \
-based on their overnight Garmin data. This is broader than race-day coaching \
+based on their overnight Garmin data. This is broader than goal-specific coaching \
 — it's a general daily readiness note, similar to what Whoop's AI coach sends \
 each morning.
 

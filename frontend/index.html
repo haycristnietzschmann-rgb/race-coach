@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-<title>Race Coach — Preview</title>
+<title>Training Coach — Preview</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
@@ -377,11 +377,11 @@
 <body>
 
   <aside class="sidebar">
-    <div class="brand"><div class="brand-mark"></div><div class="brand-name">RACE COACH</div></div>
+    <div class="brand"><div class="brand-mark"></div><div class="brand-name">TRAINING COACH</div></div>
     <nav>
       <button class="nav-item active" data-tab="overview"><span class="label"><span class="nav-dot"></span>Overview</span></button>
       <button class="nav-item" data-tab="training"><span class="label"><span class="nav-dot"></span>Training</span></button>
-      <button class="nav-item" data-tab="race"><span class="label"><span class="nav-dot"></span>Race Coach</span></button>
+      <button class="nav-item" data-tab="race"><span class="label"><span class="nav-dot"></span>Training Coach</span></button>
       <button class="nav-item" data-tab="journal"><span class="label"><span class="nav-dot"></span>Journal</span></button>
       <button class="nav-item" data-tab="archive"><span class="label"><span class="nav-dot"></span>Race Archive</span></button>
       <button class="nav-item" data-tab="ask"><span class="label"><span class="nav-dot"></span>Ask Coach</span></button>
@@ -389,10 +389,6 @@
     </nav>
     <button class="notif-btn" id="refresh-btn" onclick="refreshData()">&#8635; Refresh data</button>
     <div class="last-updated" id="last-updated"></div>
-    <div class="sidebar-footer" id="sidebar-race-info">
-      <div>Port de Palma Tri</div>
-      <div class="race-days">32<span style="font-size:11px;color:var(--muted-2);"> days</span></div>
-    </div>
   </aside>
 
   <main>
@@ -429,11 +425,11 @@
 
     <section class="tab-panel" id="panel-race">
       <div class="page-header">
-        <div class="page-title">Race Coach</div>
+        <div class="page-title">Training Coach</div>
         <div class="race-switcher">
           <select class="race-select" id="race-select">
+            <option value="general" selected>General training — no race date</option>
             <option value="palma">Port de Palma Triathlon — Sprint</option>
-            <option value="general">General Fitness (no race)</option>
           </select>
         </div>
       </div>
@@ -447,10 +443,10 @@
           <div class="chat-suggestions">
             <div class="chat-suggestion" onclick="askSuggestion('Why is my recovery low today?')">Why is my recovery low today?</div>
             <div class="chat-suggestion" onclick="askSuggestion('Should I run today?')">Should I run today?</div>
-            <div class="chat-suggestion" onclick="askSuggestion('How am I trending toward race day?')">How am I trending toward race day?</div>
+            <div class="chat-suggestion" onclick="askSuggestion('Am I getting faster?')">Am I getting faster?</div>
           </div>
           <div class="chat-messages" id="chat-messages">
-            <div class="msg coach">Hey — I'm your fitness coach. I can see your Garmin data, training plan, and race goal. Ask me anything, like "should I run today" or "why is my sleep score low."</div>
+            <div class="msg coach">Hey — I'm your fitness coach. I can see your Garmin data, training plan, and training goal. Ask me anything, like "should I run today" or "why is my sleep score low."</div>
           </div>
           <div class="chat-input-row">
             <input type="text" id="chat-input" placeholder="Ask your coach anything…" onkeydown="if(event.key==='Enter') sendChat()"/>
@@ -565,7 +561,7 @@
   <div class="modal-backdrop" id="option-modal"><div class="modal-card" id="option-modal-card"></div></div>
 
 <script>
-  let weekOffset = 0, monthOffset = 0, activeRace = "palma";
+  let weekOffset = 0, monthOffset = 0, activeRace = "general";
 
   // ---------------- Settings persistence ----------------
   // Uses localStorage so toggles (like disabling Swim) survive closing and
@@ -1139,7 +1135,7 @@
       explanation:"Combines your recent load pattern and VO2 max trend to judge whether training is currently improving fitness, maintaining it, or risking overreach. Garmin doesn't publish exact numeric thresholds for this, so the guidance below is based on the visible factors (VO2 max direction, load ratio) rather than an official formula.",
       breakdown:[{k:"Current status",v:REAL_TODAY.trainingStatus},{k:"VO2 Max",v:REAL_TODAY.vo2Max+" (needs to hold flat or trend up)"},{k:"Load ratio (ACWR)",v:REAL_TODAY.loadRatio+" — "+REAL_TODAY.acwrStatus+" (Garmin generally wants this roughly 0.8–1.3 to sustain Peaking/Productive)"},{k:"Chronic load",v:REAL_TODAY.chronicLoad+" — needs to keep building gradually, not spike or collapse"}],
       statusLadder: { tiers: ["No Status","Detraining","Unproductive","Recovery","Maintaining","Productive","Peaking","Overreaching","Strained"], current: "Peaking",
-        note: "Peaking is close to the top of the desirable range — it means recent training is translating into real fitness gains. \"Overreaching\" and \"Strained\" (above it) aren't actually better statuses, they're warning signs of pushing too hard without enough recovery. To hold Peaking rather than sliding back to Productive: keep VO2 max from dropping (needs consistent quality sessions), keep your load ratio out of the \"Low\" zone (too little training) without spiking into overload, and keep banking chronic load gradually week over week — which is exactly what the adaptive volume targets in Race Coach are tuned to do." } },
+        note: "Peaking is close to the top of the desirable range — it means recent training is translating into real fitness gains. \"Overreaching\" and \"Strained\" (above it) aren't actually better statuses, they're warning signs of pushing too hard without enough recovery. To hold Peaking rather than sliding back to Productive: keep VO2 max from dropping (needs consistent quality sessions), keep your load ratio out of the \"Low\" zone (too little training) without spiking into overload, and keep banking chronic load gradually week over week — which is exactly what the adaptive volume targets in Training Coach are tuned to do." } },
     hrv: { title:"HRV", value: REAL_TODAY.hrvOvernight+"ms", color:"var(--z1)",
       coach: (REAL_TODAY.hrvOvernight < REAL_TODAY.hrvBaselineLow ? "HRV is below your usual range today — that's the biggest single driver behind today's lower recovery score." : "HRV is in your normal range — nothing concerning here."),
       explanation:"Heart rate variability measures the variation in time between heartbeats — higher (within your personal range) generally means your nervous system is well-recovered. What matters is where you sit relative to YOUR baseline, not an absolute number.",
@@ -1554,11 +1550,11 @@
             summary: data.summary, hr_zones: data.hr_zones,
             monthly_volume: (data.monthly_volume||[]).map(function(w){ return { week_start: w.week_start, distance_km: w.distance_km, bike_km: w.bike_km||0, run_km: w.run_km||0, swim_km: w.swim_km||0 }; }),
           });
-          // Race Coach may have already run auto-detection using stale/offline
+          // Training Coach may have already run auto-detection using stale/offline
           // activity data before this live fetch finished — force it to
           // re-check now that the real activities are in, regardless of
           // which tab happens to be visible right now (Overview loads first
-          // by default, so gating this on Race Coach being active almost
+          // by default, so gating this on Training Coach being active almost
           // never actually fires).
           if (typeof currentPlan !== "undefined") {
             currentPlan.forEach(function(w){ w._processed = false; });
@@ -1632,7 +1628,7 @@
 
   // ============================================================
   // ============================================================
-  // RACE COACH TAB — weekly workout pool + assignable calendar
+  // TRAINING COACH TAB — weekly workout pool + assignable calendar
   // ============================================================
   var RACE_DATA = {
     palma: {
@@ -1937,7 +1933,7 @@
     return weeks;
   }
 
-  var currentPlan = hydratePlan(buildPalmaPlan(), "palma");
+  var currentPlan = hydratePlan(activeRace === "palma" ? buildPalmaPlan() : buildGeneralPlan(), activeRace);
   var activeWeekIdx = 0;
 
   document.getElementById("race-select").addEventListener("change", function(e) {
@@ -2095,8 +2091,8 @@
     } else {
       raceInfoHtml =
         '<div class="card"><div class="placeholder" style="padding:24px 10px;">'+
-          '<div class="icon">&#128170;</div><h3>General Fitness Mode</h3>'+
-          '<p>No race selected - this plan focuses on steady, balanced fitness improvement. Switch back to a race anytime from the dropdown above.</p>'+
+          '<div class="icon">&#128170;</div><h3>General training</h3>'+
+          '<p>No race date - this plan is built around getting genuinely faster at running and cycling while holding solid weekly distance. Pick a race from the dropdown above anytime to switch to a race-specific block.</p>'+
         '</div></div>';
     }
 
@@ -2318,7 +2314,7 @@
   var chatResponses = {
     "why is my recovery low today?": "Your recovery dipped mainly from resting HR running 4bpm above baseline overnight — that's often residual fatigue from yesterday's interval bike session, not a warning sign on its own. If it's still elevated tomorrow alongside low HRV, that's when I'd suggest backing off.",
     "should i run today?": "Yes — recovery's at 78% and today's plan has a tempo run. Keep the effort honest but don't chase pace if the first 10 minutes feel heavy; that's usually leftover fatigue, not a sign to stop.",
-    "how am i trending toward race day?": "You're on pace. Last week you hit 85% of target volume, which is right in the range I'd want heading into the Peak phase. HRV trend is flat-to-up over the past 10 days, which is a good sign your training load is sustainable, not accumulating fatigue."
+    "am i getting faster?": "Trending the right way. Your recent easy runs are ~10s/km quicker at the same heart rate as a month ago, and last week's intervals held pace without a fade. HRV trend is flat-to-up over the past 10 days, so the load driving that is sustainable, not digging a hole."
   };
 
   function appendMessage(text, sender) {

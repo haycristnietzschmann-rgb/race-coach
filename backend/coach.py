@@ -13,7 +13,7 @@ client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 SYSTEM_PROMPT = """You are a calm, experienced endurance coach speaking directly \
 to one athlete you know well. You get a JSON snapshot of their Garmin data \
 (readiness, sleep, HRV, training status, body battery, recent activities) \
-plus their race goal. Write a short daily brief:
+plus their training goal. Write a short daily brief:
 
 1. One line verdict: go hard / easy day / rest / normal training
 2. 2-3 sentences of reasoning grounded in the actual numbers you were given
@@ -57,16 +57,16 @@ def summarize_snapshot(snapshot: dict) -> dict:
 
 CHAT_SYSTEM_PROMPT = """You are a calm, experienced endurance coach in an ongoing \
 chat with one athlete you know well. You're given their current Garmin snapshot \
-(recovery, sleep, HRV, training load) and race context as background. Answer \
+(recovery, sleep, HRV, training load) and their training goal as background. Answer \
 their question directly and conversationally, grounded in the actual numbers \
 you were given. Keep answers to 2-4 sentences unless the question genuinely \
 needs more. If data needed to answer is missing, say so rather than inventing it."""
 
 
-def generate_brief(snapshot: dict, race_goal: str) -> str:
+def generate_brief(snapshot: dict, training_goal: str) -> str:
     lean_snapshot = summarize_snapshot(snapshot)
     user_content = (
-        f"Race goal: {race_goal}\n\n"
+        f"Training goal: {training_goal}\n\n"
         f"Today's Garmin summary:\n{json.dumps(lean_snapshot, indent=2, default=str)}"
     )
     response = client.messages.create(
@@ -78,10 +78,10 @@ def generate_brief(snapshot: dict, race_goal: str) -> str:
     return "".join(block.text for block in response.content if block.type == "text")
 
 
-def answer_chat(message: str, snapshot: dict, race_goal: str, history: list[dict] | None = None) -> str:
+def answer_chat(message: str, snapshot: dict, training_goal: str, history: list[dict] | None = None) -> str:
     lean_snapshot = summarize_snapshot(snapshot)
     context = (
-        f"Race goal: {race_goal}\n"
+        f"Training goal: {training_goal}\n"
         f"Current Garmin summary:\n{json.dumps(lean_snapshot, indent=2, default=str)}"
     )
     messages = [{"role": "user", "content": f"[Background context]\n{context}"}]
