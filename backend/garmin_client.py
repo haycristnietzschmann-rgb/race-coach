@@ -26,32 +26,46 @@ TOKEN_DIR = Path(os.environ.get("GARMIN_TOKENSTORE_DIR", "/tmp/garmin_tokens"))
 
 
 def _ensure_tokens_on_disk() -> None:
-    """If a saved session was provided via GARMIN_TOKENS_B64 (created by
-    running generate_garmin_tokens.py on a machine Garmin doesn't block),
-    unpack it to disk once. login() then resumes that session instead of
-    attempting a fresh password login — which Cloudflare blocks from most
-    cloud/datacenter server IPs, including Render's."""
+    """Unpack GARMIN_TOKENS_B64 (from generate_garmin_tokens.py, run on a
+    machine Garmin doesn't block) to disk so login() resumes that session
+    instead of a fresh password login — which Cloudflare 403s from datacenter
+    IPs like Render's. Re-unpacks whenever the token files are missing, not
+    just when the dir is absent."""
     b64 = os.environ.get("GARMIN_TOKENS_B64")
-    if not b64 or TOKEN_DIR.exists():
+    if not b64:
+        print("GARMIN_TOKENS_B64 not set — will attempt a fresh login (blocked on Render).")
+        return
+    if (TOKEN_DIR / "oauth1_token.json").exists():
         return
     try:
-        raw = base64.b64decode(b64)
+        TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+        raw = base64.b64decode("".join(b64.split()))  # tolerate wrapped/space-padded env values
         with zipfile.ZipFile(io.BytesIO(raw)) as zf:
             zf.extractall(TOKEN_DIR)
+        got = sorted(p.name for p in TOKEN_DIR.iterdir())
+        print(f"GARMIN_TOKENS_B64 unpacked to {TOKEN_DIR}: {got}")
     except Exception as e:
         print(f"Could not unpack GARMIN_TOKENS_B64: {e}")
 
 
 class GarminClient:
     def __init__(self):
-        email = os.environ["GARMIN_EMAIL"]
-        password = os.environ["GARMIN_PASSWORD"]
         _ensure_tokens_on_disk()
+        email = os.environ.get("GARMIN_EMAIL")
+        password = os.environ.get("GARMIN_PASSWORD")
         self.api = garminconnect.Garmin(email, password)
-        # Passing a tokenstore path makes login() try the saved session
-        # first (works from any IP, including Render's) and only falls
-        # back to a fresh password login if there's no valid saved session.
-        self.api.login(str(TOKEN_DIR))
+        have_tokens = (TOKEN_DIR / "oauth1_token.json").exists()
+        try:
+            # login(tokenstore) resumes the saved session in this garminconnect
+            # version; it does not fall back to a password login.
+            self.api.login(str(TOKEN_DIR))
+        except Exception as e:
+            if have_tokens:
+                # Last-ditch: load the session straight through garth.
+                print(f"login(tokenstore) failed ({e}) — trying garth.load()")
+                self.api.garth.load(str(TOKEN_DIR))
+            else:
+                raise
 
     def today(self) -> str:
         return dt.date.today().isoformat()

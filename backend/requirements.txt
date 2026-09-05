@@ -1,6 +1,7 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
-garminconnect>=0.3.0
+garminconnect==0.2.8
+garth==0.4.47
 anthropic>=0.40.0
 python-dotenv==1.0.1
 cryptography==43.0.1

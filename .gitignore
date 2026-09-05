@@ -8,3 +8,4 @@ backend/subscriptions.json
 backend/private_key.pem
 backend/public_key.pem
 .DS_Store
+backend/_tokens_b64.txt
