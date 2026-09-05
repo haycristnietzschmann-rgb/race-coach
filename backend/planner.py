@@ -256,20 +256,23 @@ Reply with ONLY a JSON object, no prose around it:
  "rationale":"2-4 sentences on the decisions"}"""
 
 
+def _claude_json(system: str, payload: dict, max_tokens: int = 1400):
+    resp = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=max_tokens,
+        system=system,
+        messages=[{"role": "user", "content": json.dumps(payload, indent=2, default=str)}],
+    )
+    text = "".join(b.text for b in resp.content if b.type == "text").strip()
+    if text.startswith("```"):
+        text = text.split("```", 2)[1].lstrip("json").strip()
+    return json.loads(text)
+
+
 def generate_week_plan(context: dict) -> dict:
     """Claude-generated plan; falls back to the heuristic on any failure."""
     try:
-        user_content = json.dumps(context, indent=2, default=str)
-        resp = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1400,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_content}],
-        )
-        text = "".join(b.text for b in resp.content if b.type == "text").strip()
-        if text.startswith("```"):
-            text = text.split("```", 2)[1].lstrip("json").strip()
-        plan = json.loads(text)
+        plan = _claude_json(SYSTEM_PROMPT, context)
         plan.setdefault("week_start", context["block"]["week_start"])
         plan.setdefault("vo2_projection", context["vo2_projection_model"])
         plan["source"] = "claude"
@@ -278,3 +281,206 @@ def generate_week_plan(context: dict) -> dict:
         fb = heuristic_week_plan(context)
         fb["planner_error"] = str(e)
         return fb
+
+
+# -------------------------------------------------- missed-session rescheduling
+
+ADJUST_PROMPT = """The athlete missed one or more sessions this week. Rework ONLY \
+the days that are still ahead, inside the same fixed structure (Mon/Tue/Thu are \
+<=90 min evening slots after a lift; Wed is the 2-3 h window; Fri is rest; Sat is \
+an optional easy bike/run/rest after Legs; Sun is the long ride).
+
+Decide per missed session: fold its key stimulus into a remaining day, move it to \
+the Sat optional slot, or drop it — whichever costs least. Never create a second \
+hard day back-to-back, never exceed a slot's time cap, keep Sat easy, and don't \
+push total week volume above the original target. If recovery is low, prefer \
+dropping over cramming.
+
+Reply with ONLY JSON:
+{"adjusted_sessions":[{"day","type","title","prescription","intensity","change_note"}],
+ "dropped":[{"day","title","reason"}],
+ "rationale":"2-3 sentences"}
+adjusted_sessions must cover every remaining trainable day (include unchanged ones \
+too, with change_note "unchanged")."""
+
+
+def heuristic_adjust(context: dict) -> dict:
+    """No-Claude fallback: move the first missed quality session to Saturday if
+    it's free, otherwise drop everything missed with a note."""
+    remaining = context.get("days_remaining", [])
+    missed = context.get("missed", [])
+    adjusted, dropped = [], []
+    sat_free = "Sat" in remaining
+    for i, ms in enumerate(missed):
+        if i == 0 and sat_free:
+            adjusted.append({
+                "day": "Sat", "type": ms.get("type", "Run"),
+                "title": ms.get("title", "Made-up session") + " (moved)",
+                "prescription": ms.get("prescription", "Shortened version of the missed session"),
+                "intensity": ms.get("intensity", "moderate"),
+                "change_note": "Moved here from " + ms.get("day", "?") + " — keep it a touch shorter.",
+            })
+            sat_free = False
+        else:
+            dropped.append({"day": ms.get("day", "?"), "title": ms.get("title", "session"),
+                            "reason": "No spare slot this week without stacking load — let it go."})
+    return {
+        "adjusted_sessions": adjusted,
+        "dropped": dropped,
+        "rationale": "Heuristic reshuffle (Claude unavailable): one missed session moved to the "
+                     "Saturday optional slot if it was free, the rest dropped rather than crammed.",
+        "source": "heuristic",
+    }
+
+
+def adjust_week(context: dict) -> dict:
+    try:
+        out = _claude_json(ADJUST_PROMPT, context, max_tokens=1200)
+        out["source"] = "claude"
+        return out
+    except Exception as e:
+        fb = heuristic_adjust(context)
+        fb["adjust_error"] = str(e)
+        return fb
+
+
+# ----------------------------------------------------- fitness analytics (tab)
+
+def _sec_to_clock(s) -> str | None:
+    if not isinstance(s, (int, float)) or s <= 0:
+        return None
+    s = int(round(s))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+
+def _parse_predictions(raw) -> dict:
+    """Normalise get_race_predictions() (list-of-days or single dict) to
+    {'5K','10K','half','marathon'} in seconds, newest entry."""
+    if isinstance(raw, list):
+        raw = sorted([r for r in raw if isinstance(r, dict)],
+                     key=lambda r: r.get("calendarDate", ""))
+        raw = raw[-1] if raw else {}
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        "5K": raw.get("raceTime5K") or raw.get("time5K"),
+        "10K": raw.get("raceTime10K") or raw.get("time10K"),
+        "half": raw.get("raceTimeHalfMarathon") or raw.get("timeHalfMarathon"),
+        "marathon": raw.get("raceTimeMarathon") or raw.get("timeMarathon"),
+    }
+
+
+def _best_recent_5k_equiv(activities: list[dict]) -> float | None:
+    """Riegel-scale the fastest recent run (>=3 km) to a 5 km time."""
+    best = None
+    for a in activities or []:
+        tk = ((a.get("activityType") or {}).get("typeKey") or "")
+        if "running" not in tk:
+            continue
+        dist = a.get("distance") or 0
+        dur = a.get("movingDuration") or a.get("duration") or 0
+        if dist < 3000 or dur <= 0:
+            continue
+        pred = dur * (5000.0 / dist) ** 1.06
+        if best is None or pred < best:
+            best = pred
+    return best
+
+
+def estimate_5k(predictions: dict, activities: list[dict], vo2_series: list[dict], role: str) -> dict:
+    p = _parse_predictions(predictions)
+    current = p.get("5K") or _best_recent_5k_equiv(activities)
+    source = "Garmin race predictor" if p.get("5K") else ("recent run, Riegel-scaled" if current else "no data")
+    if not current:
+        return {"current_sec": None, "current_str": None, "source": source,
+                "projection_4wk_str": None, "delta_sec": None, "rationale": "No recent runs to estimate a 5K from."}
+
+    vo2_vals = [x.get("running") for x in (vo2_series or []) if isinstance(x.get("running"), (int, float))]
+    vo2_slope = _slope_per_week(vo2_vals[-6:]) if len(vo2_vals) >= 2 else 0.0
+    # ~1 VO2 point ≈ ~1% at 5K. Damp, bound, kill on deload.
+    weekly_pct = max(-0.004, min(0.010, vo2_slope * 0.010 * 0.6))
+    if role == "deload":
+        weekly_pct = min(weekly_pct, 0.0)
+    proj = current * (1 - weekly_pct) ** 4
+    delta = round(current - proj)
+    return {
+        "current_sec": round(current),
+        "current_str": _sec_to_clock(current),
+        "source": source,
+        "projection_4wk_sec": round(proj),
+        "projection_4wk_str": _sec_to_clock(proj),
+        "delta_sec": delta,
+        "weekly_delta_sec": round(current - current * (1 - weekly_pct)),
+        "rationale": (
+            f"Current 5K estimate {_sec_to_clock(current)} ({source}). VO2 max trend "
+            f"~{vo2_slope:+.2f}/wk implies about {weekly_pct*100:+.1f}%/wk at 5K pace, so "
+            f"~{_sec_to_clock(proj)} in 4 weeks if the trend holds ({'-' if delta>=0 else '+'}"
+            f"{abs(delta)}s)."
+        ),
+    }
+
+
+def pace_at_hr_series(activities: list[dict], weeks: int = 10) -> list[dict]:
+    """Weekly mean easy-run pace normalised to HR 140 (sec/km). Lower = fitter.
+    Only uses runs with an average HR in an easy-aerobic band."""
+    today = dt.date.today()
+    this_monday = _monday(today)
+    buckets: dict[str, list[float]] = {}
+    for a in activities or []:
+        tk = ((a.get("activityType") or {}).get("typeKey") or "")
+        if "running" not in tk:
+            continue
+        dist = a.get("distance") or 0
+        dur = a.get("movingDuration") or a.get("duration") or 0
+        hr = a.get("averageHR") or a.get("avgHr")
+        if dist < 2000 or dur <= 0 or not hr or hr < 115 or hr > 160:
+            continue
+        try:
+            d = dt.date.fromisoformat((a.get("startTimeLocal") or "")[:10])
+        except Exception:
+            continue
+        wk = _monday(d).isoformat()
+        pace = (dur / (dist / 1000.0))
+        buckets.setdefault(wk, []).append(pace * (140.0 / hr))
+    out = []
+    for i in range(weeks - 1, -1, -1):
+        wk = (this_monday - dt.timedelta(days=7 * i)).isoformat()
+        vals = buckets.get(wk)
+        out.append({"week_start": wk, "sec_per_km": round(sum(vals) / len(vals)) if vals else None})
+    return out
+
+
+def build_fitness(garmin) -> dict:
+    """Everything the Fitness tab shows, assembled defensively."""
+    def safe(fn, default):
+        try:
+            return fn()
+        except Exception:
+            return default
+
+    this_monday = _monday(dt.date.today()).isoformat()
+    next_monday = (_monday(dt.date.today()) + dt.timedelta(days=7)).isoformat()
+    role = block_meta(next_monday)["role"]
+
+    vo2_series = safe(lambda: garmin.vo2max_trend(weeks=10), [])
+    activities = safe(lambda: garmin.activities_last_weeks(weeks=12), [])
+    predictions = safe(lambda: garmin.race_predictions(), {})
+
+    return {
+        "block": safe(lambda: block_meta(dt.date.today().isoformat()), {}),
+        "vo2_series": vo2_series,
+        "vo2_current": safe(lambda: garmin.vo2max_current(), {}),
+        "vo2_projection": project_vo2(vo2_series, role),
+        "race_predictions": _parse_predictions(predictions),
+        "estimate_5k": estimate_5k(predictions, activities, vo2_series, role),
+        "pace_at_hr_series": pace_at_hr_series(activities, weeks=10),
+        "volume_12wk": safe(lambda: garmin.monthly_volume(weeks=12), []),
+        "readiness_trend": safe(lambda: garmin.readiness_trend("3month"), []),
+        "hrv_trend": safe(lambda: garmin.hrv_trend("month"), []),
+        "training_load_trend": safe(lambda: garmin.training_load_trend("month"), []),
+        "stats_today": safe(lambda: garmin.stats(), {}),
+        "ftp": safe(lambda: (garmin.training_status() or {}).get("functionalThresholdPower"), None),
+        "generated": dt.datetime.now().isoformat(timespec="seconds"),
+    }

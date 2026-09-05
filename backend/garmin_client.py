@@ -277,6 +277,13 @@ class GarminClient:
             })
         return out
 
+    def activities_last_weeks(self, weeks: int = 12) -> list[dict]:
+        """Flat list of activities across the last N ISO weeks (best-effort)."""
+        start, _ = self.week_bounds(offset_weeks=-(weeks - 1))
+        _, end = self.week_bounds(offset_weeks=0)
+        acts = self.activities_in_range(start, end)
+        return [a for a in acts if isinstance(a, dict) and a.get("activityId")]
+
     def snapshot(self) -> dict:
         """Everything the dashboard needs in one call."""
         return {

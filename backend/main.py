@@ -14,10 +14,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from garmin_client import get_client
-from coach import generate_brief, answer_chat
+from coach import generate_brief, answer_chat, summarize_snapshot
 from morning_report import generate_morning_report
 from push import add_subscription, send_notification_to_all
-from planner import assemble_context, generate_week_plan, block_meta, project_vo2
+from planner import (
+    assemble_context, generate_week_plan, adjust_week,
+    block_meta, project_vo2, build_fitness,
+)
 
 # Training goal fed to the Claude coaching prompts (morning brief + Ask Coach).
 # Falls back to the legacy RACE_GOAL env var so existing Render configs keep
@@ -403,7 +406,47 @@ def plan_recalculate(body: dict = None):
     body = body or {}
     monday = _plan_monday(body.get("week_start"))
     _record_outcome(monday)                                 # log how last week went first
+    _fitness_cache.clear()
     return plan_week(week_start=monday, refresh=True)
+
+
+@app.post("/api/plan/adjust")
+def plan_adjust(body: dict = None):
+    """Rework the rest of the current week around missed sessions."""
+    body = body or {}
+    monday = _plan_monday(body.get("week_start"))
+    plan = _plan_state["weeks"].get(monday)
+    if not plan:
+        client = get_client()
+        plan = generate_week_plan(assemble_context(client, _plan_state, monday))
+        _plan_state["weeks"][monday] = plan
+
+    missed = body.get("missed") or []
+    completed = body.get("completed") or []
+    days_remaining = body.get("days_remaining") or []
+    try:
+        snap = summarize_snapshot(get_client().snapshot())
+    except Exception:
+        snap = {}
+
+    context = {
+        "block": block_meta(monday),
+        "week_plan": plan,
+        "missed": missed,
+        "completed": completed,
+        "days_remaining": days_remaining,
+        "recovery_snapshot": snap,
+    }
+    result = adjust_week(context)
+
+    plan.setdefault("adjustments", []).append({
+        "at": dt.datetime.now().isoformat(timespec="seconds"),
+        "missed": missed, "result": result,
+    })
+    plan["adjustments"] = plan["adjustments"][-5:]
+    _plan_state["weeks"][monday] = plan
+    _save_plan_state(_plan_state)
+    return result
 
 
 @app.get("/api/fitness")
@@ -411,23 +454,6 @@ def fitness(refresh: bool = False):
     key = dt.date.today().isoformat()
     if _fitness_cache.get("key") == key and not refresh:
         return _fitness_cache["data"]
-
-    client = get_client()
-    this_monday = _plan_monday(None)
-    next_monday = (dt.date.fromisoformat(this_monday) + dt.timedelta(days=7)).isoformat()
-    vo2_series = client.vo2max_trend(weeks=10)
-
-    data = {
-        "vo2_series": vo2_series,
-        "vo2_current": client.vo2max_current(),
-        "vo2_projection": project_vo2(vo2_series, block_meta(next_monday)["role"]),
-        "volume_12wk": client.monthly_volume(weeks=12),
-        "readiness_trend": client.readiness_trend("3month"),
-        "hrv_trend": client.hrv_trend("month"),
-        "training_load_trend": client.training_load_trend("month"),
-        "stats_today": client.stats(),
-        "block": block_meta(dt.date.today().isoformat()),
-        "generated": dt.datetime.now().isoformat(timespec="seconds"),
-    }
+    data = build_fitness(get_client())
     _fitness_cache.update(key=key, data=data)
     return data
