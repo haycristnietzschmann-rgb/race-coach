@@ -149,17 +149,64 @@ def health():
 _morning_cache: dict = {"date": _persisted.get("morning_date"), "report": _persisted.get("morning_report")}
 
 
+def _morning_extra_context() -> str:
+    """Plan-vs-actual for the current week + sleep debt, for the morning brief."""
+    bits = []
+    try:
+        monday = _plan_monday(None)
+        plan = _plan_state["weeks"].get(monday) or {}
+        if plan:
+            client = get_client()
+            end = (dt.date.fromisoformat(monday) + dt.timedelta(days=6)).isoformat()
+            acts = [a for a in client.activities_in_range(monday, end) if isinstance(a, dict)]
+
+            def km(kind):
+                return round(sum((a.get("distance") or 0) for a in acts
+                                 if kind in ((a.get("activityType") or {}).get("typeKey") or "")) / 1000, 1)
+
+            bits.append(
+                f"Week ({plan.get('role')}, {plan.get('focus')}-focus): "
+                f"bike {km('cycling')}/{plan.get('bike_km')} km, run {km('running')}/{plan.get('run_km')} km so far."
+            )
+    except Exception:
+        pass
+    try:
+        analysis = build_sleep(get_client()).get("analysis", {})
+        debt = analysis.get("debt_hours")
+        if isinstance(debt, (int, float)):
+            bits.append(f"Sleep balance last 7 nights: {debt:+.1f} h "
+                        f"(need ~{analysis.get('sleep_need_hours')} h).")
+    except Exception:
+        pass
+    return " ".join(bits)
+
+
 def _run_morning_job():
     """Generates today's report and pushes it. Called by the scheduler,
     and also callable directly for testing."""
     snapshot = _get_cached_snapshot()  # reuses today's snapshot if dashboard already pulled it
-    report = generate_morning_report(snapshot)
+    report = generate_morning_report(snapshot, _morning_extra_context())
     today = dt.date.today().isoformat()
     _morning_cache.update(date=today, report=report)
     _persisted.update(morning_date=today, morning_report=report)
     _save_persisted_cache(_persisted)
     send_notification_to_all("Your morning report is ready", report[:120])
     return report
+
+
+def _run_bedtime_job():
+    """Evening wind-down nudge with tonight's recommended bedtime."""
+    try:
+        analysis = build_sleep(get_client()).get("analysis", {})
+        bt = analysis.get("recommended_bedtime")
+        need = analysis.get("sleep_need_hours")
+        if bt:
+            send_notification_to_all(
+                "Wind-down time",
+                f"Target bedtime tonight is {bt} (need ~{need} h). Screens down soon.",
+            )
+    except Exception:
+        pass
 
 
 @app.get("/api/morning-report")
@@ -247,6 +294,7 @@ def chat(body: dict):
 
 scheduler = BackgroundScheduler()
 scheduler.add_job(_run_morning_job, "cron", hour=7, minute=0)
+scheduler.add_job(_run_bedtime_job, "cron", hour=21, minute=0)
 scheduler.start()
 
 

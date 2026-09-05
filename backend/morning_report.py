@@ -25,19 +25,19 @@ Be direct and specific. If data is missing, say so rather than inventing it. \
 No greetings, no sign-off, no filler."""
 
 
-def generate_morning_report(snapshot: dict) -> str:
+def generate_morning_report(snapshot: dict, extra_context: str = "") -> str:
     # Trim the raw Garmin snapshot before sending — the raw version includes
     # minute-by-minute sleep movement, SpO2, HRV, and respiration data
     # (hundreds of entries), which was silently inflating every call to
     # 30,000+ tokens instead of a few hundred.
     lean_snapshot = summarize_snapshot(snapshot)
+    content = f"Overnight/today Garmin summary:\n{json.dumps(lean_snapshot, indent=2, default=str)}"
+    if extra_context:
+        content += f"\n\nThis week's training + sleep context:\n{extra_context}"
     response = client.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=200,
+        max_tokens=220,
         system=SYSTEM_PROMPT,
-        messages=[{
-            "role": "user",
-            "content": f"Overnight/today Garmin summary:\n{json.dumps(lean_snapshot, indent=2, default=str)}",
-        }],
+        messages=[{"role": "user", "content": content}],
     )
     return "".join(b.text for b in response.content if b.type == "text")
