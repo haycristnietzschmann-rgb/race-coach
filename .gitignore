@@ -3,6 +3,7 @@ backend/venv/
 backend/__pycache__/
 backend/daily_cache.json
 backend/plan_state.json
+backend/fixtures.json
 backend/subscriptions.json
 backend/private_key.pem
 backend/public_key.pem

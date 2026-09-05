@@ -432,4 +432,8 @@ class GarminClient:
 @lru_cache
 def get_client() -> GarminClient:
     # Cached so we only log in once per process, not once per request.
+    if os.environ.get("GARMIN_FIXTURE_MODE"):
+        # Serve canned numbers from fixtures.json — no Garmin requests at all.
+        from fixtures import FixtureClient
+        return FixtureClient()
     return GarminClient()

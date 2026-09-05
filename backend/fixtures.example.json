@@ -1,0 +1,43 @@
+{
+  "_comment": "Copy to fixtures.json and set GARMIN_FIXTURE_MODE=1 to serve these instead of calling Garmin. Any key you omit falls back to a sensible default. Times as HH:MM, distances/kms as numbers, durations in seconds.",
+
+  "vo2_running": 40,
+  "vo2_cycling": 43,
+  "resting_hr": 52,
+  "weight_kg": 74.0,
+
+  "hrv_last_night": 62,
+  "hrv_baseline_low": 55,
+  "hrv_baseline_high": 85,
+  "readiness": 68,
+  "sleep_score": 74,
+
+  "training_status": "Productive",
+  "acwr": 1.10,
+  "ftp": 240,
+  "endurance_score": 480,
+  "hill_score": 55,
+  "heat_accl_pct": 60,
+  "altitude_accl_m": 300,
+
+  "pr_5k_sec": 1230,
+  "pr_10k_sec": 2600,
+  "pr_half_sec": 5700,
+  "pr_marathon_sec": null,
+
+  "weekly_bike_km": 130,
+  "weekly_run_km": 28,
+  "recent_5k_run": { "distance_m": 5000, "moving_sec": 1250, "avg_hr": 172 },
+
+  "sleep_avg_min": 430,
+  "sleep_deep_min": 65,
+  "sleep_rem_min": 95,
+  "sleep_light_min": 245,
+  "sleep_awake_min": 25,
+  "bedtime": "23:20",
+  "waketime": "06:40",
+
+  "vo2_gain_12wk": 1.2,
+  "rhr_drop_12wk": 2,
+  "weight_drop_12wk": 1.0
+}

@@ -11,6 +11,7 @@ dict the frontend can display, success or failure.
 """
 from __future__ import annotations
 
+import os
 import re
 import datetime as dt
 
@@ -224,6 +225,10 @@ def push_workout(name: str, sport: str, prescription: str, date: str | None = No
     sport_key = _SPORT_ID.get(sport, "running")
     steps = parse_prescription(prescription, sport_key)
     payload = build_workout_payload(name, sport_key, steps)
+    if os.environ.get("GARMIN_FIXTURE_MODE"):
+        return {"ok": True, "workout_id": "fixture", "name": name, "steps": len(steps),
+                "scheduled": date, "note": "fixture mode — parsed OK, not sent to Garmin",
+                "payload_preview": payload}
     try:
         created = _api_post("/workout-service/workout", payload) or {}
         wid = created.get("workoutId") or created.get("workoutid") or created.get("id")
