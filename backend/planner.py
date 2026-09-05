@@ -526,6 +526,103 @@ def pace_at_hr_series(activities: list[dict], weeks: int = 10) -> list[dict]:
     return out
 
 
+# ----------------------------------------------------------------- sleep (tab)
+
+SLEEP_PROMPT = """You are a sleep coach for one endurance athlete. You get their
+last ~14 nights (score, total minutes, deep/REM/light/awake minutes, bedtime,
+wake time, resting HR) plus their current training phase and load.
+
+Work out:
+- their individual sleep NEED in hours (not a generic 8 — infer it from the
+  nights where score and next-day readiness were best, nudged up for higher
+  training load / build & peak weeks),
+- a recommended BEDTIME and WAKE TIME that hit that need with a consistent
+  schedule, anchored to their recent actual wake times,
+- current sleep DEBT in hours over the last 7 nights vs need,
+- what to prioritise.
+
+Reply with ONLY JSON:
+{"sleep_need_hours": float, "recommended_bedtime": "HH:MM",
+ "recommended_waketime": "HH:MM", "debt_hours": float,
+ "consistency_note": "one sentence", "analysis": "3-4 sentences",
+ "priorities": ["short imperative", "..."]}"""
+
+
+def _clock_to_min(s):
+    try:
+        h, m = s.split(":")
+        return int(h) * 60 + int(m)
+    except Exception:
+        return None
+
+
+def _min_to_clock(x):
+    x = int(round(x)) % (24 * 60)
+    return f"{x // 60:02d}:{x % 60:02d}"
+
+
+def heuristic_sleep(nights: list[dict], role: str) -> dict:
+    got = [n for n in nights if isinstance(n.get("total_min"), (int, float))]
+    if not got:
+        return {"sleep_need_hours": 8.0, "recommended_bedtime": "22:45",
+                "recommended_waketime": "06:45", "debt_hours": None,
+                "consistency_note": "No sleep data yet.", "analysis": "Not enough sleep history.",
+                "priorities": ["Wear the watch overnight for a few nights."], "source": "heuristic"}
+    good = [n for n in got if isinstance(n.get("score"), (int, float)) and n["score"] >= 80] or got
+    need_min = sum(n["total_min"] for n in good) / len(good)
+    need_min = max(450, need_min)
+    need_min += {"build": 10, "build+": 20, "peak": 25, "deload": 0}.get(role, 0)
+    last7 = got[-7:]
+    debt = sum((need_min - n["total_min"]) for n in last7) / 60.0
+    wakes = [_clock_to_min(n["waketime"]) for n in got if n.get("waketime")]
+    wake = sorted(wakes)[len(wakes) // 2] if wakes else 6 * 60 + 45
+    return {
+        "sleep_need_hours": round(need_min / 60, 1),
+        "recommended_waketime": _min_to_clock(wake),
+        "recommended_bedtime": _min_to_clock(wake - need_min - 20),
+        "debt_hours": round(debt, 1),
+        "consistency_note": "Wake times vary by "
+            + (f"{(max(wakes) - min(wakes))} min" if len(wakes) > 1 else "n/a")
+            + " over the window.",
+        "analysis": (f"Your best-scoring nights average {need_min/60:.1f} h, so that's the working "
+                     f"target ({role} week). Last 7 nights ran a "
+                     f"{abs(debt):.1f} h {'deficit' if debt > 0 else 'surplus'} against it."),
+        "priorities": (["Clear the sleep debt with 2–3 earlier nights."] if debt > 2 else
+                       ["Hold the current schedule — it's working."]),
+        "source": "heuristic",
+    }
+
+
+def sleep_analysis(nights: list[dict], role: str) -> dict:
+    try:
+        out = _claude_json(SLEEP_PROMPT, {"nights": nights, "training_phase": role}, max_tokens=900)
+        out["source"] = "claude"
+        # keep the heuristic's numbers if Claude omitted them
+        for k, v in heuristic_sleep(nights, role).items():
+            out.setdefault(k, v)
+        return out
+    except Exception as e:
+        fb = heuristic_sleep(nights, role)
+        fb["analysis_error"] = str(e)
+        return fb
+
+
+def build_sleep(garmin) -> dict:
+    def safe(fn, d):
+        try:
+            return fn()
+        except Exception:
+            return d
+    role = block_meta(dt.date.today().isoformat()).get("role", "build")
+    nights = safe(lambda: garmin.sleep_history(nights=14), [])
+    return {
+        "nights": nights,
+        "analysis": sleep_analysis(nights, role),
+        "block": block_meta(dt.date.today().isoformat()),
+        "generated": dt.datetime.now().isoformat(timespec="seconds"),
+    }
+
+
 _TS_CODES = {
     0: "No status", 1: "Detraining", 2: "Unproductive", 3: "Recovery",
     4: "Maintaining", 5: "Productive", 6: "Peaking", 7: "Overreaching", 8: "Strained",

@@ -354,6 +354,37 @@ class GarminClient:
             out.append({"week_start": mon, "bpm": rhr})
         return out
 
+    def sleep_history(self, nights: int = 14) -> list[dict]:
+        """Per-night sleep: score, stage minutes, bed/wake clock times, RHR."""
+        out = []
+        for i in range(nights - 1, -1, -1):
+            day = (dt.date.today() - dt.timedelta(days=i)).isoformat()
+            rec = {"date": day, "score": None, "total_min": None, "deep_min": None,
+                   "rem_min": None, "light_min": None, "awake_min": None,
+                   "bedtime": None, "waketime": None, "resting_hr": None}
+            try:
+                s = self.api.get_sleep_data(day) or {}
+                d = s.get("dailySleepDTO", {}) or {}
+                def m(sec):
+                    return round(sec / 60) if isinstance(sec, (int, float)) else None
+                rec["total_min"] = m(d.get("sleepTimeSeconds"))
+                rec["deep_min"] = m(d.get("deepSleepSeconds"))
+                rec["rem_min"] = m(d.get("remSleepSeconds"))
+                rec["light_min"] = m(d.get("lightSleepSeconds"))
+                rec["awake_min"] = m(d.get("awakeSleepSeconds"))
+                rec["score"] = (d.get("sleepScores", {}) or {}).get("overall", {}).get("value")
+                rec["resting_hr"] = s.get("restingHeartRate") or d.get("restingHeartRate")
+                for k_src, k_dst in (("sleepStartTimestampLocal", "bedtime"), ("sleepEndTimestampLocal", "waketime")):
+                    ts = d.get(k_src)
+                    if isinstance(ts, (int, float)):
+                        rec[k_dst] = dt.datetime.fromtimestamp(ts / 1000).strftime("%H:%M")
+                    elif isinstance(ts, str) and "T" in ts:
+                        rec[k_dst] = ts.split("T")[1][:5]
+            except Exception:
+                pass
+            out.append(rec)
+        return out
+
     def acclimatization(self) -> dict:
         """Heat / altitude acclimation — lives inside the training status blob."""
         try:

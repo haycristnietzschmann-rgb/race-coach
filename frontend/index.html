@@ -382,6 +382,7 @@
       <button class="nav-item active" data-tab="overview"><span class="label"><span class="nav-dot"></span>Overview</span></button>
       <button class="nav-item" data-tab="training"><span class="label"><span class="nav-dot"></span>Training</span></button>
       <button class="nav-item" data-tab="fitness"><span class="label"><span class="nav-dot"></span>Fitness</span></button>
+      <button class="nav-item" data-tab="sleep"><span class="label"><span class="nav-dot"></span>Sleep</span></button>
       <button class="nav-item" data-tab="race"><span class="label"><span class="nav-dot"></span>Training Coach</span></button>
       <button class="nav-item" data-tab="journal"><span class="label"><span class="nav-dot"></span>Journal</span></button>
       <button class="nav-item" data-tab="archive"><span class="label"><span class="nav-dot"></span>Race Archive</span></button>
@@ -427,6 +428,11 @@
     <section class="tab-panel" id="panel-fitness">
       <div class="page-header"><div class="page-title">Fitness</div></div>
       <div id="fitness-content"><div class="status">Loading fitness data&hellip;</div></div>
+    </section>
+
+    <section class="tab-panel" id="panel-sleep">
+      <div class="page-header"><div class="page-title">Sleep</div></div>
+      <div id="sleep-content"><div class="status">Loading sleep data&hellip;</div></div>
     </section>
 
     <section class="tab-panel" id="panel-race">
@@ -739,6 +745,7 @@
       btn.classList.add("active");
       document.getElementById("panel-" + btn.dataset.tab).classList.add("active");
       if (btn.dataset.tab === "fitness") loadFitness();
+      if (btn.dataset.tab === "sleep") loadSleep();
     });
   });
 
@@ -2843,6 +2850,96 @@
     document.getElementById("option-modal").classList.add("open");
   }
 
+  // ============================================================
+  // SLEEP TAB — custom score, debt, adaptive need + recommended times
+  // ============================================================
+  var lastSleep = null;
+  function loadSleep() {
+    var el = document.getElementById("sleep-content");
+    if (!el) return;
+    if (!liveMode) { lastSleep = null; el.innerHTML = renderSleepOffline(); return; }
+    el.innerHTML = '<div class="status">Loading sleep data&hellip;</div>';
+    fetch(settings.apiBase + "/api/sleep")
+      .then(function(r){ if(!r.ok) throw new Error("bad"); return r.json(); })
+      .then(function(d){ lastSleep = d; el.innerHTML = renderSleep(d); })
+      .catch(function(){ lastSleep = null; el.innerHTML = renderSleepOffline("Couldn't reach the backend — showing the offline snapshot."); });
+  }
+
+  function renderSleepOffline(msg) {
+    var s = (typeof REAL_TODAY !== "undefined") ? computeSleepScoreCustom({
+      totalSleepMin: REAL_TODAY.totalSleepMin, deepSleepMin: REAL_TODAY.deepSleepMin,
+      remSleepMin: REAL_TODAY.remSleepMin, awakeMin: REAL_TODAY.awakeMin
+    }) : { score: "—" };
+    return '<div class="card"><div class="card-title">Sleep</div>' +
+      '<p style="font-size:12.5px; color:var(--muted); line-height:1.55;">' + (msg || "Connect your backend in Settings to see your sleep history, custom score analysis, and Claude-computed sleep need + recommended bed/wake times.") + '</p>' +
+      '<div style="display:flex; align-items:center; gap:16px; margin-top:12px;">' + ring(typeof s.score === "number" ? s.score : 0, 100, "var(--z1)", 70) +
+      '<div><div style="font-family:\'Bebas Neue\',sans-serif; font-size:28px;">' + s.score + '</div><div style="font-size:12px; color:var(--muted);">Custom sleep score (offline snapshot)</div></div></div></div>';
+  }
+
+  function renderSleep(data) {
+    var nights = (data.nights || []).filter(function(n){ return n && typeof n === "object"; });
+    var withData = nights.filter(function(n){ return typeof n.total_min === "number"; });
+    var a = data.analysis || {};
+    var blk = data.block || {};
+
+    // custom score for the latest night with stage data
+    var latest = null;
+    for (var i = withData.length - 1; i >= 0; i--) { if (typeof withData[i].deep_min === "number") { latest = withData[i]; break; } }
+    var custom = latest ? computeSleepScoreCustom({
+      totalSleepMin: latest.total_min, deepSleepMin: latest.deep_min || 0,
+      remSleepMin: latest.rem_min || 0, awakeMin: latest.awake_min || 0
+    }) : null;
+
+    // ---- tonight's target ----
+    var targetCard = '<div class="card"><div class="card-title">Tonight\'s target</div>' +
+      (blk.role ? '<div style="font-family:\'IBM Plex Mono\',monospace; font-size:10px; color:var(--muted-2); text-transform:uppercase; margin-bottom:10px;">' + blk.role + ' week — sleep need scales with load</div>' : '') +
+      '<div style="display:flex; gap:26px; flex-wrap:wrap; align-items:baseline;">' +
+        '<div><div style="font-family:\'Bebas Neue\',sans-serif; font-size:34px; color:var(--z1);">' + (a.recommended_bedtime || "—") + '</div><div style="font-size:11px; color:var(--muted);">bedtime</div></div>' +
+        '<div style="font-size:18px; color:var(--muted-2);">&rarr;</div>' +
+        '<div><div style="font-family:\'Bebas Neue\',sans-serif; font-size:34px; color:var(--z1);">' + (a.recommended_waketime || "—") + '</div><div style="font-size:11px; color:var(--muted);">wake</div></div>' +
+        '<div><div style="font-family:\'Bebas Neue\',sans-serif; font-size:34px;">' + (a.sleep_need_hours != null ? a.sleep_need_hours + "h" : "—") + '</div><div style="font-size:11px; color:var(--muted);">your sleep need</div></div>' +
+      '</div>' +
+      (a.debt_hours != null ? '<div style="margin-top:12px; font-size:12.5px; color:' + (a.debt_hours > 2 ? "var(--z5)" : a.debt_hours < -1 ? "var(--z2)" : "var(--muted)") + ';">Sleep balance last 7 nights: ' + (a.debt_hours > 0 ? "&minus;" : "+") + Math.abs(a.debt_hours) + ' h ' + (a.debt_hours > 0 ? "in debt" : "ahead") + '</div>' : '') +
+      (a.consistency_note ? '<div style="margin-top:4px; font-size:11.5px; color:var(--muted-2);">' + a.consistency_note + '</div>' : '') +
+    '</div>';
+
+    // ---- score ----
+    var scoreCard = custom ? '<div class="card"><div class="card-title">Sleep score — custom formula</div>' +
+      '<div style="display:flex; align-items:center; gap:16px;">' + ring(custom.score, 100, "var(--z1)", 66) +
+        '<div><div style="font-family:\'Bebas Neue\',sans-serif; font-size:30px;">' + custom.score + (typeof latest.score === "number" ? ' <span style="font-size:13px; color:var(--muted-2);">/ ' + latest.score + ' Garmin</span>' : '') + '</div>' +
+        '<div style="font-size:11px; color:var(--muted);">Deep ' + custom.deepPct + '% · REM ' + custom.remPct + '% · efficiency ' + custom.effPct + '%</div></div></div>' +
+      '<div style="margin-top:10px;">' + custom.components.map(function(c){ return '<div class="modal-breakdown-row"><span class="k">' + c.k + ' <span style="color:var(--muted-2);">(' + c.w + ')</span></span><span class="v">' + c.v + '</span></div>'; }).join("") + '</div>' +
+    '</div>' : "";
+
+    // ---- duration trend ----
+    var durS = withData.map(function(n){ return { date: n.date, score: Math.round(n.total_min / 6) / 10 }; });
+    var needLine = a.sleep_need_hours || null;
+    var durCard = durS.length >= 2 ? '<div class="card"><div class="card-title">Sleep duration — last ' + durS.length + ' nights</div>' +
+      detailedChart(durS, "var(--z1)", "h", "Hours") +
+      (needLine ? '<div style="font-size:11px; color:var(--muted-2); margin-top:6px;">Need ≈ ' + needLine + ' h. Nights below the line are adding to debt.</div>' : '') +
+    '</div>' : "";
+
+    // ---- stages (latest) ----
+    var stagesCard = latest && typeof latest.deep_min === "number" ? (function(){
+      var segs = [["Deep", latest.deep_min, "var(--z1)"], ["REM", latest.rem_min || 0, "var(--z2)"], ["Light", latest.light_min || 0, "var(--z4)"], ["Awake", latest.awake_min || 0, "var(--z5)"]];
+      var tot = segs.reduce(function(x, s){ return x + s[1]; }, 0) || 1;
+      return '<div class="card"><div class="card-title">Stages — ' + latest.date + '</div>' +
+        '<div style="display:flex; height:26px; border-radius:6px; overflow:hidden;">' +
+          segs.map(function(s){ return '<div style="width:' + (s[1] / tot * 100) + '%; background:' + s[2] + ';" title="' + s[0] + ' ' + s[1] + 'm"></div>'; }).join("") + '</div>' +
+        '<div style="display:flex; gap:14px; margin-top:8px; font-size:11px; color:var(--muted);">' +
+          segs.map(function(s){ return '<span><span style="color:' + s[2] + ';">&#9632;</span> ' + s[0] + ' ' + Math.round(s[1]) + 'm</span>'; }).join("") + '</div></div>';
+    })() : "";
+
+    // ---- analysis ----
+    var analysisCard = a.analysis ? '<div class="card"><div class="card-title">Analysis' + (a.source === "claude" ? "" : " (heuristic)") + '</div>' +
+      '<p style="font-size:13px; color:var(--text); line-height:1.55; margin:0 0 10px;">' + a.analysis + '</p>' +
+      ((a.priorities || []).length ? '<ul style="margin:0; padding-left:18px; font-size:12.5px; color:var(--muted); line-height:1.6;">' + a.priorities.map(function(p){ return '<li>' + p + '</li>'; }).join("") + '</ul>' : '') +
+    '</div>' : "";
+
+    return targetCard + scoreCard + durCard + stagesCard + analysisCard +
+      '<div style="font-size:10.5px; color:var(--muted-2); text-align:center; margin-top:4px;">Updated ' + (data.generated || "").slice(0,16).replace("T"," ") + '</div>';
+  }
+
   function renderRaceCoach() {
     if (activeRace !== "palma") { renderFixedPlan(); return; }
     var isRace = activeRace === "palma";
@@ -3273,6 +3370,7 @@
         .finally(function() {
           loadOverview(); loadTraining(); renderRaceCoach(); if (liveMode) loadMorningReport();
           if (document.getElementById("panel-fitness").classList.contains("active")) loadFitness();
+          if (document.getElementById("panel-sleep").classList.contains("active")) loadSleep();
         });
     } else {
       loadOverview(); loadTraining(); renderRaceCoach();

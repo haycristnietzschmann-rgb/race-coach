@@ -19,7 +19,7 @@ from morning_report import generate_morning_report
 from push import add_subscription, send_notification_to_all
 from planner import (
     assemble_context, generate_week_plan, adjust_week,
-    block_meta, project_vo2, build_fitness,
+    block_meta, project_vo2, build_fitness, build_sleep,
 )
 from garmin_writer import push_workout, push_week as gc_push_week
 
@@ -473,6 +473,19 @@ def garmin_push_workout(body: dict = None):
         body.get("prescription") or body.get("title") or "",
         body.get("date"),
     )
+
+
+_sleep_cache: dict = {}
+
+
+@app.get("/api/sleep")
+def sleep(refresh: bool = False):
+    key = dt.date.today().isoformat()
+    if _sleep_cache.get("key") == key and not refresh:
+        return _sleep_cache["data"]
+    data = build_sleep(get_client())
+    _sleep_cache.update(key=key, data=data)
+    return data
 
 
 @app.post("/api/garmin/push-week")
