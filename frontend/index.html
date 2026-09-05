@@ -381,6 +381,7 @@
     <nav>
       <button class="nav-item active" data-tab="overview"><span class="label"><span class="nav-dot"></span>Overview</span></button>
       <button class="nav-item" data-tab="training"><span class="label"><span class="nav-dot"></span>Training</span></button>
+      <button class="nav-item" data-tab="fitness"><span class="label"><span class="nav-dot"></span>Fitness</span></button>
       <button class="nav-item" data-tab="race"><span class="label"><span class="nav-dot"></span>Training Coach</span></button>
       <button class="nav-item" data-tab="journal"><span class="label"><span class="nav-dot"></span>Journal</span></button>
       <button class="nav-item" data-tab="archive"><span class="label"><span class="nav-dot"></span>Race Archive</span></button>
@@ -421,6 +422,11 @@
         </div>
       </div>
       <div id="training-content"><div class="status">Loading training data&hellip;</div></div>
+    </section>
+
+    <section class="tab-panel" id="panel-fitness">
+      <div class="page-header"><div class="page-title">Fitness</div></div>
+      <div id="fitness-content"><div class="status">Loading fitness data&hellip;</div></div>
     </section>
 
     <section class="tab-panel" id="panel-race">
@@ -618,6 +624,7 @@
       loadTraining();
       loadMorningReport();
       if (document.getElementById("panel-race").classList.contains("active")) renderRaceCoach();
+      if (document.getElementById("panel-fitness").classList.contains("active")) loadFitness();
     }).catch(function() {
       statusEl.textContent = "Couldn't reach that URL — check it's deployed and correct.";
       statusEl.style.color = "var(--z5)";
@@ -731,6 +738,7 @@
       document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
       btn.classList.add("active");
       document.getElementById("panel-" + btn.dataset.tab).classList.add("active");
+      if (btn.dataset.tab === "fitness") loadFitness();
     });
   });
 
@@ -2412,6 +2420,136 @@
     document.getElementById("option-modal").classList.add("open");
   }
 
+  // ============================================================
+  // FITNESS TAB — VO2 max, speed/recovery trends, next-week projection
+  // ============================================================
+  var lastFitness = null;
+
+  function loadFitness() {
+    var el = document.getElementById("fitness-content");
+    if (!el) return;
+    if (!liveMode) {
+      lastFitness = null;
+      el.innerHTML = renderFitnessOffline();
+      return;
+    }
+    el.innerHTML = '<div class="status">Loading fitness data&hellip;</div>';
+    fetch(settings.apiBase + "/api/fitness")
+      .then(function(r){ if(!r.ok) throw new Error("bad status"); return r.json(); })
+      .then(function(data){ lastFitness = data; el.innerHTML = renderFitness(data); })
+      .catch(function(){ lastFitness = null; el.innerHTML = renderFitnessOffline("Couldn't reach the backend — showing the offline snapshot."); });
+  }
+
+  function renderFitnessOffline(msg) {
+    var v = getCurrentVO2Max();
+    return '<div class="card"><div class="card-title">Fitness</div>' +
+      '<p style="font-size:12.5px; color:var(--muted); line-height:1.55;">' +
+        (msg || "Connect your backend in Settings to see your VO2 max history, weekly speed/recovery trends, and next week’s projection.") + '</p>' +
+      '<div style="display:flex; align-items:center; gap:16px; margin-top:12px;">' + ring(v, 60, "var(--z3)", 70) +
+        '<div><div style="font-family:\'Bebas Neue\',sans-serif; font-size:28px;">' + v + '</div>' +
+        '<div style="font-size:12px; color:var(--muted);">Current VO2 max (from the offline snapshot)</div></div></div>' +
+    '</div>';
+  }
+
+  function fmtDelta(d) {
+    if (d === null || d === undefined) return "—";
+    return (d > 0 ? "+" : "") + d;
+  }
+
+  function renderFitness(data) {
+    var series = (data.vo2_series || []).map(function(p){ return { date: p.week_start, score: (typeof p.running === "number" ? p.running : null) }; });
+    var bikeSeries = (data.vo2_series || []).map(function(p){ return { date: p.week_start, score: (typeof p.cycling === "number" ? p.cycling : null) }; });
+    var proj = data.vo2_projection || {};
+    var cur = data.vo2_current || {};
+    var blk = data.block || {};
+
+    var blockLine = blk.role
+      ? '<div style="font-family:\'IBM Plex Mono\',monospace; font-size:10px; color:var(--muted-2); text-transform:uppercase; margin-bottom:10px;">Cycle ' + blk.cycle + ' &middot; Week ' + blk.week_in_cycle + ' &middot; ' + blk.role + ' &middot; ' + blk.focus + '-focus</div>'
+      : '';
+
+    // ---- VO2 max + clickable trend ----
+    var runNow = (typeof cur.running === "number") ? cur.running : (proj.current || "—");
+    var bikeNow = (typeof cur.cycling === "number") ? cur.cycling : "—";
+    var vo2Card =
+      '<div class="card"><div class="card-title">VO2 max</div>' + blockLine +
+      '<div style="display:flex; gap:22px; flex-wrap:wrap; margin-bottom:6px;">' +
+        '<div><div style="font-family:\'Bebas Neue\',sans-serif; font-size:30px; color:var(--z2);">' + runNow + '</div><div style="font-size:11px; color:var(--muted);">Running</div></div>' +
+        '<div><div style="font-family:\'Bebas Neue\',sans-serif; font-size:30px; color:var(--z4);">' + bikeNow + '</div><div style="font-size:11px; color:var(--muted);">Cycling</div></div>' +
+      '</div>' +
+      '<div onclick="openVo2Projection()" style="cursor:pointer; border:1px solid var(--line); border-radius:8px; padding:8px 6px 2px; transition:border-color .15s;" onmouseover="this.style.borderColor=\'var(--z2)\'" onmouseout="this.style.borderColor=\'var(--line)\'">' +
+        detailedChart(series.length ? series : [{date:"—",score:null}], "var(--z2)", "", "VO2 (run)") +
+        '<div style="text-align:center; font-size:10.5px; color:var(--z2); padding:4px 0 6px;">Tap for next week’s projection &rsaquo;</div>' +
+      '</div>' +
+      '<div style="display:flex; justify-content:space-between; margin-top:10px; font-size:12.5px;">' +
+        '<span style="color:var(--muted);">Projected next week</span>' +
+        '<span style="color:var(--text);"><strong>' + (proj.next_week != null ? proj.next_week : "—") + '</strong> ' +
+          '<span style="color:' + (proj.delta > 0 ? "var(--z2)" : proj.delta < 0 ? "var(--z5)" : "var(--muted-2)") + ';">(' + fmtDelta(proj.delta) + ')</span></span>' +
+      '</div></div>';
+
+    // ---- weekly volume, 12wk ----
+    var vol = (data.volume_12wk || []).filter(function(w){ return w && typeof w === "object"; });
+    var maxV = Math.max(1, Math.max.apply(null, vol.map(function(w){ return (w.bike_km||0) + (w.run_km||0); })));
+    var volBars = vol.map(function(w){
+      var bh = Math.round((w.bike_km||0)/maxV*70), rh = Math.round((w.run_km||0)/maxV*70);
+      var tip = w.week_start + ": " + Math.round(w.bike_km||0) + " km bike, " + Math.round(w.run_km||0) + " km run";
+      return '<div style="flex:1; display:flex; flex-direction:column; justify-content:flex-end; align-items:center; gap:1px;" ' +
+        'onmousemove="showTooltip(event, \'Week\', \'' + tip + '\')" onmouseleave="hideTooltip()">' +
+        '<div style="width:70%; height:' + rh + 'px; background:var(--z2);"></div>' +
+        '<div style="width:70%; height:' + bh + 'px; background:var(--z4);"></div></div>';
+    }).join("");
+    var volCard = '<div class="card"><div class="card-title">Weekly volume — last ' + vol.length + ' weeks</div>' +
+      '<div style="display:flex; align-items:flex-end; gap:3px; height:78px;">' + volBars + '</div>' +
+      '<div style="font-size:10.5px; color:var(--muted-2); margin-top:6px;"><span style="color:var(--z4);">&#9632;</span> bike &nbsp; <span style="color:var(--z2);">&#9632;</span> run</div></div>';
+
+    // ---- recovery / load trends ----
+    function trendCard(title, pts, color, unit, label) {
+      var mapped = (pts || []).map(function(p){ return { date: p.date || p.calendarDate || p.week_start || "", score: (typeof p.score === "number" ? p.score : (typeof p.value === "number" ? p.value : (typeof p.weeklyAvg === "number" ? p.weeklyAvg : null))) }; });
+      return '<div class="card"><div class="card-title">' + title + '</div>' + detailedChart(mapped.length ? mapped : [{date:"—",score:null}], color, unit || "", label || title) + '</div>';
+    }
+    var rhr = (data.stats_today && (data.stats_today.restingHeartRate || data.stats_today.restingHR)) || null;
+    var rhrLine = rhr ? '<div class="card"><div class="card-title">Resting HR (today)</div><div style="font-family:\'Bebas Neue\',sans-serif; font-size:30px;">' + rhr + ' <span style="font-size:13px; color:var(--muted);">bpm</span></div></div>' : "";
+
+    return vo2Card +
+      volCard +
+      trendCard("Readiness — 3 months", data.readiness_trend, "var(--z2)", "", "Readiness") +
+      trendCard("HRV — last month", data.hrv_trend, "var(--z1)", "ms", "HRV") +
+      trendCard("Training load — last month", data.training_load_trend, "var(--z3)", "", "Load") +
+      rhrLine +
+      '<div style="font-size:10.5px; color:var(--muted-2); text-align:center; margin-top:4px;">Updated ' + (data.generated || "").slice(0,16).replace("T"," ") + '</div>';
+  }
+
+  function openVo2Projection() {
+    var data = lastFitness;
+    var proj = (data && data.vo2_projection) || null;
+    var card = document.getElementById("option-modal-card");
+    if (!proj || proj.current == null) {
+      card.innerHTML = '<button class="modal-close" onclick="closeOptionModal()">&times;</button>' +
+        '<div class="modal-title" style="color:var(--z2);">VO2 max projection</div>' +
+        '<p class="modal-explanation">Not enough recent weekly VO2 max readings to project yet. This fills in once a few weeks of Garmin data are in.</p>';
+      document.getElementById("option-modal").classList.add("open");
+      return;
+    }
+    var arrow = proj.delta > 0 ? "&#9650;" : proj.delta < 0 ? "&#9660;" : "&#8594;";
+    var col = proj.delta > 0 ? "var(--z2)" : proj.delta < 0 ? "var(--z5)" : "var(--muted-2)";
+    var recent = (data.vo2_series || []).filter(function(p){ return typeof p.running === "number"; }).slice(-6);
+    var recentRows = recent.map(function(p){
+      return '<div class="modal-breakdown-row"><span class="k">' + p.week_start + '</span><span class="v">' + p.running + '</span></div>';
+    }).join("");
+    card.innerHTML =
+      '<button class="modal-close" onclick="closeOptionModal()">&times;</button>' +
+      '<div class="modal-title" style="color:var(--z2);">VO2 max — next week</div>' +
+      '<div style="display:flex; align-items:baseline; gap:10px; margin:6px 0 10px;">' +
+        '<div style="font-family:\'Bebas Neue\',sans-serif; font-size:34px;">' + proj.current + '</div>' +
+        '<div style="color:' + col + '; font-size:15px;">' + arrow + ' ' + fmtDelta(proj.delta) + '</div>' +
+        '<div style="font-family:\'Bebas Neue\',sans-serif; font-size:34px; color:' + col + ';">' + proj.next_week + '</div>' +
+      '</div>' +
+      '<div class="modal-breakdown-row"><span class="k">Confidence</span><span class="v">' + (proj.confidence || "—") + '</span></div>' +
+      '<p class="modal-explanation" style="margin:12px 0 14px;">' + (proj.rationale || "") + '</p>' +
+      '<div class="modal-breakdown-title">Recent weekly readings (running)</div>' + recentRows +
+      '<p class="modal-explanation" style="margin-top:14px; font-size:11.5px; color:var(--muted-2);">This is a trend-based estimate. When the adaptive planner recalculates your week it refines this using your training load, recovery, and how past blocks went.</p>';
+    document.getElementById("option-modal").classList.add("open");
+  }
+
   function renderRaceCoach() {
     if (activeRace !== "palma") { renderFixedPlan(); return; }
     var isRace = activeRace === "palma";
@@ -2841,6 +2979,7 @@
         })
         .finally(function() {
           loadOverview(); loadTraining(); renderRaceCoach(); if (liveMode) loadMorningReport();
+          if (document.getElementById("panel-fitness").classList.contains("active")) loadFitness();
         });
     } else {
       loadOverview(); loadTraining(); renderRaceCoach();
