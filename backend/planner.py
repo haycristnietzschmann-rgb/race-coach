@@ -389,37 +389,111 @@ def _best_recent_5k_equiv(activities: list[dict]) -> float | None:
     return best
 
 
-def estimate_5k(predictions: dict, activities: list[dict], vo2_series: list[dict], role: str) -> dict:
-    p = _parse_predictions(predictions)
-    current = p.get("5K") or _best_recent_5k_equiv(activities)
-    source = "Garmin race predictor" if p.get("5K") else ("recent run, Riegel-scaled" if current else "no data")
-    if not current:
-        return {"current_sec": None, "current_str": None, "source": source,
-                "projection_4wk_str": None, "delta_sec": None, "rationale": "No recent runs to estimate a 5K from."}
+def _fitness_slope_per_week(vo2_series, pace_series, endurance_series) -> tuple:
+    """Blend the VO2 trend, easy-pace-at-HR trend and endurance-score trend into
+    one 'am I getting fitter' slope, expressed as fractional pace gain per week
+    (positive = getting faster). Returns (weekly_pct, note)."""
+    parts = []
+    vo2 = [x.get("running") for x in (vo2_series or []) if isinstance(x.get("running"), (int, float))]
+    if len(vo2) >= 3:
+        s = _slope_per_week(vo2[-6:])
+        parts.append(("VO2", s * 0.010))                       # ~1 pt ≈ 1% at 5K
+    pace = [x.get("sec_per_km") for x in (pace_series or []) if isinstance(x.get("sec_per_km"), (int, float))]
+    if len(pace) >= 3:
+        s = _slope_per_week(pace[-6:])                          # sec/km per week, lower=better
+        base = sum(pace[-3:]) / 3
+        parts.append(("efficiency", -s / base if base else 0))
+    endu = [x.get("overallScore") or x.get("score") for x in (endurance_series or [])
+            if isinstance(x, dict) and isinstance(x.get("overallScore") or x.get("score"), (int, float))]
+    if len(endu) >= 3:
+        s = _slope_per_week(endu[-6:])
+        base = sum(endu[-3:]) / 3
+        parts.append(("endurance", (s / base) * 0.5 if base else 0))
+    if not parts:
+        return 0.0, "no fitness trend signal yet"
+    weekly = sum(p[1] for p in parts) / len(parts)
+    weekly = max(-0.006, min(0.012, weekly))                    # keep it realistic
+    return weekly, "blend of " + ", ".join(p[0] for p in parts)
 
-    vo2_vals = [x.get("running") for x in (vo2_series or []) if isinstance(x.get("running"), (int, float))]
-    vo2_slope = _slope_per_week(vo2_vals[-6:]) if len(vo2_vals) >= 2 else 0.0
-    # ~1 VO2 point ≈ ~1% at 5K. Damp, bound, kill on deload.
-    weekly_pct = max(-0.004, min(0.010, vo2_slope * 0.010 * 0.6))
+
+def estimate_pr_5k(personal_records: dict, activities: list[dict],
+                   vo2_series, pace_series, endurance_series, role: str) -> dict:
+    """Athlete's real 5K PR (Garmin personal record, else best recent 5K-equiv
+    effort) and what it could realistically drop to in 4 weeks on the current
+    fitness trajectory. This is a training-trajectory estimate, NOT a race
+    predictor."""
+    pr = (personal_records or {}).get("run_5k")
+    current = pr or _best_recent_5k_equiv(activities)
+    if not current:
+        return {"pr_sec": None, "pr_str": None, "source": "no data", "projection_4wk_str": None,
+                "delta_sec": None, "rationale": "No 5K PR on Garmin and no recent run ≥3 km to estimate one from."}
+    source = "Garmin personal record" if pr else "best recent run, Riegel-scaled (no PR on file)"
+
+    weekly_pct, note = _fitness_slope_per_week(vo2_series, pace_series, endurance_series)
     if role == "deload":
         weekly_pct = min(weekly_pct, 0.0)
     proj = current * (1 - weekly_pct) ** 4
     delta = round(current - proj)
     return {
-        "current_sec": round(current),
-        "current_str": _sec_to_clock(current),
+        "pr_sec": round(current),
+        "pr_str": _sec_to_clock(current),
         "source": source,
         "projection_4wk_sec": round(proj),
         "projection_4wk_str": _sec_to_clock(proj),
         "delta_sec": delta,
-        "weekly_delta_sec": round(current - current * (1 - weekly_pct)),
+        "trend_note": note,
         "rationale": (
-            f"Current 5K estimate {_sec_to_clock(current)} ({source}). VO2 max trend "
-            f"~{vo2_slope:+.2f}/wk implies about {weekly_pct*100:+.1f}%/wk at 5K pace, so "
-            f"~{_sec_to_clock(proj)} in 4 weeks if the trend holds ({'-' if delta>=0 else '+'}"
-            f"{abs(delta)}s)."
+            f"Your 5K PR is {_sec_to_clock(current)} ({source}). Current fitness trend "
+            f"({note}) works out to about {weekly_pct*100:+.1f}%/wk at 5K pace, so a "
+            f"{_sec_to_clock(proj)} 5K looks achievable in ~4 weeks if training holds "
+            f"({'-' if delta>=0 else '+'}{abs(delta)}s). Not a race-day prediction — it "
+            f"assumes a good day and a real 5K effort."
         ),
     }
+
+
+def biological_age(vo2_running, rhr, chrono_age=None) -> dict:
+    """Fitness (biological) age from VO2 max, lightly adjusted by resting HR.
+    ~0.4 ml/kg/min of VO2 max ≈ one year (male reference norms)."""
+    if not isinstance(vo2_running, (int, float)):
+        return {"fitness_age": None, "note": "Needs a current running VO2 max."}
+    fa = 20 + (48.0 - vo2_running) / 0.4
+    if isinstance(rhr, (int, float)):
+        fa += (rhr - 55) * 0.15                                 # lower RHR trims a little
+    fa = max(18, min(80, round(fa, 1)))
+    out = {"fitness_age": fa, "basis": "VO2 max" + (" + resting HR" if isinstance(rhr, (int, float)) else "")}
+    if isinstance(chrono_age, (int, float)):
+        out["chronological_age"] = chrono_age
+        out["delta_years"] = round(fa - chrono_age, 1)
+    return out
+
+
+def composite_fitness_index(vo2_series, pace_series, rhr_series, endurance_series) -> list[dict]:
+    """Weekly 0–100 fitness index blending VO2 max, aerobic efficiency (pace at
+    HR, inverted), resting HR (inverted) and endurance score — each normalised
+    against its own recent range. This is the 'fitness improving on multiple
+    factors' graph."""
+    weeks = {}
+    def add(series, key, invert):
+        vals = [(x.get("week_start"), x.get(key)) for x in (series or [])
+                if isinstance(x, dict) and isinstance(x.get(key), (int, float))]
+        nums = [v for _, v in vals]
+        if len(nums) < 2:
+            return
+        lo, hi = min(nums), max(nums)
+        rng = (hi - lo) or 1
+        for wk, v in vals:
+            norm = (v - lo) / rng
+            if invert:
+                norm = 1 - norm
+            weeks.setdefault(wk, []).append(norm)
+    add(vo2_series, "running", False)
+    add(pace_series, "sec_per_km", True)
+    add(rhr_series, "bpm", True)
+    add([{"week_start": x.get("week_start") or x.get("calendarDate"),
+          "score": x.get("overallScore") or x.get("score")} for x in (endurance_series or []) if isinstance(x, dict)],
+        "score", False)
+    return [{"week_start": wk, "index": round(sum(v) / len(v) * 100)} for wk, v in sorted(weeks.items()) if v]
 
 
 def pace_at_hr_series(activities: list[dict], weeks: int = 10) -> list[dict]:
@@ -452,6 +526,35 @@ def pace_at_hr_series(activities: list[dict], weeks: int = 10) -> list[dict]:
     return out
 
 
+_TS_CODES = {
+    0: "No status", 1: "Detraining", 2: "Unproductive", 3: "Recovery",
+    4: "Maintaining", 5: "Productive", 6: "Peaking", 7: "Overreaching", 8: "Strained",
+}
+
+
+def _ts_summary(ts: dict) -> tuple:
+    """Best-effort (status label, acute:chronic ratio) out of Garmin's deeply
+    nested get_training_status blob."""
+    if not isinstance(ts, dict):
+        return None, None
+    label = None
+    acwr = None
+    mr = ts.get("mostRecentTrainingStatus") or {}
+    latest = mr.get("latestTrainingStatusData") or {}
+    for dev in (latest.values() if isinstance(latest, dict) else []):
+        if not isinstance(dev, dict):
+            continue
+        code = dev.get("trainingStatus")
+        if isinstance(code, int):
+            label = _TS_CODES.get(code, str(code))
+        label = dev.get("trainingStatusFeedbackPhrase") and label or label
+        acwr = acwr or dev.get("acuteChronicWorkloadRatio") or dev.get("acwr")
+    label = label or ts.get("trainingStatus")
+    if isinstance(label, int):
+        label = _TS_CODES.get(label, str(label))
+    return label, (round(acwr, 2) if isinstance(acwr, (int, float)) else None)
+
+
 def build_fitness(garmin) -> dict:
     """Everything the Fitness tab shows, assembled defensively."""
     def safe(fn, default):
@@ -460,27 +563,47 @@ def build_fitness(garmin) -> dict:
         except Exception:
             return default
 
-    this_monday = _monday(dt.date.today()).isoformat()
     next_monday = (_monday(dt.date.today()) + dt.timedelta(days=7)).isoformat()
     role = block_meta(next_monday)["role"]
 
-    vo2_series = safe(lambda: garmin.vo2max_trend(weeks=10), [])
+    vo2_series = safe(lambda: garmin.vo2max_trend(weeks=12), [])
+    vo2_current = safe(lambda: garmin.vo2max_current(), {})
     activities = safe(lambda: garmin.activities_last_weeks(weeks=12), [])
-    predictions = safe(lambda: garmin.race_predictions(), {})
+    prs = safe(lambda: garmin.personal_records(), {})
+    pace_series = pace_at_hr_series(activities, weeks=12)
+    rhr_series = safe(lambda: garmin.resting_hr_trend(weeks=12), [])
+    endurance = safe(lambda: garmin.endurance_score(), {})
+    endurance_series = endurance.get("enduranceScoreDTO", {}).get("groupList", []) if isinstance(endurance, dict) else []
+    ts = safe(lambda: garmin.training_status(), {})
+    stats_today = safe(lambda: garmin.stats(), {})
+
+    ts_label, acwr = _ts_summary(ts)
+
+    vo2_run = vo2_current.get("running") if isinstance(vo2_current, dict) else None
+    rhr_now = (stats_today or {}).get("restingHeartRate") or (rhr_series[-1]["bpm"] if rhr_series and rhr_series[-1].get("bpm") else None)
 
     return {
         "block": safe(lambda: block_meta(dt.date.today().isoformat()), {}),
         "vo2_series": vo2_series,
-        "vo2_current": safe(lambda: garmin.vo2max_current(), {}),
+        "vo2_current": vo2_current,
         "vo2_projection": project_vo2(vo2_series, role),
-        "race_predictions": _parse_predictions(predictions),
-        "estimate_5k": estimate_5k(predictions, activities, vo2_series, role),
-        "pace_at_hr_series": pace_at_hr_series(activities, weeks=10),
+        "estimate_pr_5k": estimate_pr_5k(prs, activities, vo2_series, pace_series, endurance_series, role),
+        "personal_records": prs,
+        "biological_age": biological_age(vo2_run, rhr_now),
+        "fitness_index_series": composite_fitness_index(vo2_series, pace_series, rhr_series, endurance_series),
+        "pace_at_hr_series": pace_series,
+        "rhr_series": rhr_series,
+        "weight_series": safe(lambda: garmin.weight_trend(weeks=12), []),
+        "endurance_score": endurance,
+        "hill_score": safe(lambda: garmin.hill_score(), {}),
+        "acclimatization": safe(lambda: garmin.acclimatization(), {}),
+        "training_status": ts,
+        "training_status_label": ts_label,
+        "acwr": acwr,
+        "training_load_trend": safe(lambda: garmin.training_load_trend("3month"), []),
         "volume_12wk": safe(lambda: garmin.monthly_volume(weeks=12), []),
-        "readiness_trend": safe(lambda: garmin.readiness_trend("3month"), []),
         "hrv_trend": safe(lambda: garmin.hrv_trend("month"), []),
-        "training_load_trend": safe(lambda: garmin.training_load_trend("month"), []),
-        "stats_today": safe(lambda: garmin.stats(), {}),
-        "ftp": safe(lambda: (garmin.training_status() or {}).get("functionalThresholdPower"), None),
+        "stats_today": stats_today,
+        "ftp": (ts or {}).get("functionalThresholdPower"),
         "generated": dt.datetime.now().isoformat(timespec="seconds"),
     }

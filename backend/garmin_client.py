@@ -231,51 +231,151 @@ class GarminClient:
             })
         return out
 
-    # ---- VO2 max (Fitness tab + adaptive planner) ----
+    # ---- VO2 max / fitness metrics (Fitness tab + adaptive planner) ----
+
+    @staticmethod
+    def _dig_vo2(obj) -> tuple:
+        """Pull (running, cycling) VO2 max out of any of Garmin's shapes."""
+        if isinstance(obj, list):
+            obj = obj[0] if obj else {}
+        if not isinstance(obj, dict):
+            return None, None
+        # get_max_metrics: {generic:{vo2MaxValue}, cycling:{vo2MaxValue}}
+        # training_status.mostRecentVO2Max: same shape nested one deeper
+        gen = obj.get("generic") or obj.get("running") or {}
+        cyc = obj.get("cycling") or {}
+        run_v = gen.get("vo2MaxPreciseValue") or gen.get("vo2MaxValue") or obj.get("vo2MaxValue")
+        cyc_v = cyc.get("vo2MaxPreciseValue") or cyc.get("vo2MaxValue")
+        return run_v, cyc_v
 
     def vo2max_current(self, date: str | None = None) -> dict:
-        """Best-effort current VO2 max (running + cycling) from whichever
-        Garmin endpoint answers. Returns {} on failure — callers must cope."""
+        """Current VO2 max. Prefers training_status.mostRecentVO2Max (what the
+        Garmin app shows as 'today'), falls back to get_max_metrics."""
         date = date or self.today()
+        run_v = cyc_v = None
         try:
-            m = self.api.get_max_metrics(date) or {}
-            if isinstance(m, list):
-                m = m[0] if m else {}
-            gen = (m.get("generic") or {}) if isinstance(m, dict) else {}
-            cyc = (m.get("cycling") or {}) if isinstance(m, dict) else {}
-            run_v = gen.get("vo2MaxValue") or gen.get("vo2MaxPreciseValue")
-            cyc_v = cyc.get("vo2MaxValue") or cyc.get("vo2MaxPreciseValue")
-            if run_v or cyc_v:
-                return {"date": date, "running": run_v, "cycling": cyc_v}
+            ts = self.training_status(date) or {}
+            run_v, cyc_v = self._dig_vo2(ts.get("mostRecentVO2Max"))
         except Exception:
             pass
-        # Fallback: training status sometimes carries the most recent VO2 max.
-        try:
-            ts = self.training_status(date)
-            recent = (ts or {}).get("mostRecentVO2Max") or {}
-            gen = (recent.get("generic") or {})
-            cyc = (recent.get("cycling") or {})
-            return {
-                "date": date,
-                "running": gen.get("vo2MaxValue") or gen.get("vo2MaxPreciseValue"),
-                "cycling": cyc.get("vo2MaxValue") or cyc.get("vo2MaxPreciseValue"),
-            }
-        except Exception as e:
-            return {"error": str(e)}
+        if not run_v and not cyc_v:
+            try:
+                run_v, cyc_v = self._dig_vo2(self.api.get_max_metrics(date))
+            except Exception as e:
+                return {"error": str(e)}
+        def r1(v):
+            return round(float(v), 1) if isinstance(v, (int, float)) else None
+        return {"date": date, "running": r1(run_v), "cycling": r1(cyc_v)}
 
-    def vo2max_trend(self, weeks: int = 8) -> list[dict]:
-        """One VO2 max reading per week (sampled on each week's Monday) for the
-        last N weeks. Best-effort; missing weeks come back with null values."""
+    def vo2max_trend(self, weeks: int = 10) -> list[dict]:
+        """One VO2 max reading per week (sampled on each week's Monday). VO2 max
+        genuinely moves slowly, so repeated values across weeks are expected."""
         out = []
         for i in range(weeks - 1, -1, -1):
             monday, _ = self.week_bounds(offset_weeks=-i)
-            v = self.vo2max_current(monday)
-            out.append({
-                "week_start": monday,
-                "running": v.get("running") if isinstance(v, dict) else None,
-                "cycling": v.get("cycling") if isinstance(v, dict) else None,
-            })
+            run_v = cyc_v = None
+            try:
+                run_v, cyc_v = self._dig_vo2(self.api.get_max_metrics(monday))
+            except Exception:
+                pass
+            def r1(v):
+                return round(float(v), 1) if isinstance(v, (int, float)) else None
+            out.append({"week_start": monday, "running": r1(run_v), "cycling": r1(cyc_v)})
         return out
+
+    def personal_records(self) -> dict:
+        """Personal records keyed by a readable label, seconds for time PRs."""
+        try:
+            raw = self.api.get_personal_record() or []
+        except Exception as e:
+            return {"error": str(e)}
+        # typeId map (Garmin running/cycling PR codes)
+        labels = {1: "run_1mi", 2: "run_1km", 3: "run_5k", 4: "run_10k",
+                  5: "run_half", 6: "run_marathon", 7: "longest_run_m",
+                  8: "longest_ride_m", 12: "longest_ride_m"}
+        out = {}
+        for r in raw if isinstance(raw, list) else []:
+            if not isinstance(r, dict):
+                continue
+            key = labels.get(r.get("typeId"))
+            val = r.get("value")
+            if key and isinstance(val, (int, float)):
+                out[key] = val
+        return out
+
+    def endurance_score(self) -> dict:
+        try:
+            end = (self.week_bounds()[1])
+            start = self.week_bounds(offset_weeks=-11)[0]
+            return self.api.get_endurance_score(start, end) or {}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def hill_score(self) -> dict:
+        try:
+            end = self.week_bounds()[1]
+            start = self.week_bounds(offset_weeks=-11)[0]
+            return self.api.get_hill_score(start, end) or {}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def weight_trend(self, weeks: int = 12) -> list[dict]:
+        """Weekly latest weight (kg). Best-effort from weigh-ins / body comp."""
+        out = []
+        for i in range(weeks - 1, -1, -1):
+            mon, sun = self.week_bounds(offset_weeks=-i)
+            kg = None
+            try:
+                wi = self.api.get_weigh_ins(mon, sun) or {}
+                allw = wi.get("dailyWeightSummaries") or wi.get("dateWeightList") or []
+                if isinstance(allw, list) and allw:
+                    last = allw[-1]
+                    grams = last.get("weight") or (last.get("latestWeight") or {}).get("weight")
+                    if grams:
+                        kg = round(grams / 1000.0, 1)
+            except Exception:
+                pass
+            out.append({"week_start": mon, "kg": kg})
+        return out
+
+    def resting_hr_trend(self, weeks: int = 12) -> list[dict]:
+        out = []
+        for i in range(weeks - 1, -1, -1):
+            mon, _ = self.week_bounds(offset_weeks=-i)
+            rhr = None
+            try:
+                d = self.api.get_rhr_day(mon) or {}
+                metrics = d.get("allMetrics", {}).get("metricsMap", {}) if isinstance(d, dict) else {}
+                arr = metrics.get("WELLNESS_RESTING_HEART_RATE") or []
+                if arr and isinstance(arr, list):
+                    rhr = arr[0].get("value")
+            except Exception:
+                pass
+            out.append({"week_start": mon, "bpm": rhr})
+        return out
+
+    def acclimatization(self) -> dict:
+        """Heat / altitude acclimation — lives inside the training status blob."""
+        try:
+            ts = self.training_status() or {}
+            hac = ts.get("heatAltitudeAcclimation") or {}
+            if not hac:
+                # sometimes under the most-recent training status sub-object
+                mr = ts.get("mostRecentTrainingStatus", {}) or {}
+                latest = (mr.get("latestTrainingStatusData") or {})
+                for v in latest.values():
+                    if isinstance(v, dict) and ("heatAcclimationPercentage" in v or "heatTrend" in v):
+                        hac = v
+                        break
+            return {
+                "heat_pct": hac.get("heatAcclimationPercentage"),
+                "altitude_m": hac.get("altitudeAcclimation"),
+                "heat_trend": hac.get("heatTrend"),
+                "altitude_trend": hac.get("altitudeTrend"),
+                "current_altitude_m": hac.get("currentAltitude"),
+            }
+        except Exception as e:
+            return {"error": str(e)}
 
     def activities_last_weeks(self, weeks: int = 12) -> list[dict]:
         """Flat list of activities across the last N ISO weeks (best-effort)."""
