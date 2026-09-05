@@ -13,6 +13,7 @@ keep working against the fixture data.
 """
 from __future__ import annotations
 
+import os
 import json
 import math
 import datetime as dt
@@ -41,7 +42,17 @@ _DEFAULTS = {
 
 
 def _load() -> dict:
+    """Anchors, in priority order: FIXTURES_JSON env var (paste the JSON blob
+    straight into the Render dashboard — no file, no commit) > local
+    fixtures.json (handy for local dev) > built-in defaults."""
     data = dict(_DEFAULTS)
+    raw = os.environ.get("FIXTURES_JSON")
+    if raw:
+        try:
+            data.update(json.loads(raw))
+            return data
+        except Exception:
+            pass
     try:
         data.update(json.loads(_FILE.read_text()))
     except Exception:
