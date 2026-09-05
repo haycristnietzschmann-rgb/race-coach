@@ -231,6 +231,52 @@ class GarminClient:
             })
         return out
 
+    # ---- VO2 max (Fitness tab + adaptive planner) ----
+
+    def vo2max_current(self, date: str | None = None) -> dict:
+        """Best-effort current VO2 max (running + cycling) from whichever
+        Garmin endpoint answers. Returns {} on failure — callers must cope."""
+        date = date or self.today()
+        try:
+            m = self.api.get_max_metrics(date) or {}
+            if isinstance(m, list):
+                m = m[0] if m else {}
+            gen = (m.get("generic") or {}) if isinstance(m, dict) else {}
+            cyc = (m.get("cycling") or {}) if isinstance(m, dict) else {}
+            run_v = gen.get("vo2MaxValue") or gen.get("vo2MaxPreciseValue")
+            cyc_v = cyc.get("vo2MaxValue") or cyc.get("vo2MaxPreciseValue")
+            if run_v or cyc_v:
+                return {"date": date, "running": run_v, "cycling": cyc_v}
+        except Exception:
+            pass
+        # Fallback: training status sometimes carries the most recent VO2 max.
+        try:
+            ts = self.training_status(date)
+            recent = (ts or {}).get("mostRecentVO2Max") or {}
+            gen = (recent.get("generic") or {})
+            cyc = (recent.get("cycling") or {})
+            return {
+                "date": date,
+                "running": gen.get("vo2MaxValue") or gen.get("vo2MaxPreciseValue"),
+                "cycling": cyc.get("vo2MaxValue") or cyc.get("vo2MaxPreciseValue"),
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    def vo2max_trend(self, weeks: int = 8) -> list[dict]:
+        """One VO2 max reading per week (sampled on each week's Monday) for the
+        last N weeks. Best-effort; missing weeks come back with null values."""
+        out = []
+        for i in range(weeks - 1, -1, -1):
+            monday, _ = self.week_bounds(offset_weeks=-i)
+            v = self.vo2max_current(monday)
+            out.append({
+                "week_start": monday,
+                "running": v.get("running") if isinstance(v, dict) else None,
+                "cycling": v.get("cycling") if isinstance(v, dict) else None,
+            })
+        return out
+
     def snapshot(self) -> dict:
         """Everything the dashboard needs in one call."""
         return {

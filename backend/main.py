@@ -17,6 +17,7 @@ from garmin_client import get_client
 from coach import generate_brief, answer_chat
 from morning_report import generate_morning_report
 from push import add_subscription, send_notification_to_all
+from planner import assemble_context, generate_week_plan, block_meta, project_vo2
 
 # Training goal fed to the Claude coaching prompts (morning brief + Ask Coach).
 # Falls back to the legacy RACE_GOAL env var so existing Render configs keep
@@ -71,6 +72,30 @@ _cache = {
     "snapshot": _persisted.get("snapshot"),
     "brief": _persisted.get("brief"),
 }
+
+# ---- Adaptive planner state ----
+# Separate file from the daily cache: this one is the planner's memory —
+# every generated week plus the actuals + recovery/VO2 deltas that followed,
+# so the weekly recalculation can learn what ramp / deload has worked.
+_PLAN_FILE = Path(__file__).parent / "plan_state.json"
+
+def _load_plan_state() -> dict:
+    if _PLAN_FILE.exists():
+        try:
+            return json.loads(_PLAN_FILE.read_text())
+        except Exception:
+            return {}
+    return {}
+
+def _save_plan_state(data: dict) -> None:
+    try:
+        _PLAN_FILE.write_text(json.dumps(data, default=str))
+    except Exception:
+        pass
+
+_plan_state = _load_plan_state()
+_plan_state.setdefault("weeks", {})       # monday_iso -> generated plan
+_plan_state.setdefault("outcomes", [])    # rolling log of week -> what happened
 
 
 def _days_to_race() -> int | None:
@@ -297,3 +322,112 @@ def training(week_offset: int = 0, refresh: bool = False):
     _training_cache.clear()
     _training_cache[key] = result
     return result
+
+
+# ---- Adaptive planner + Fitness tab ----
+
+_fitness_cache: dict = {}
+
+
+def _plan_monday(week_start: str = None) -> str:
+    base = week_start or dt.date.today().isoformat()
+    try:
+        return block_meta(base)["week_start"]
+    except Exception:
+        return block_meta(dt.date.today().isoformat())["week_start"]
+
+
+def _completion_pct(plan: dict, bike_actual: float, run_actual: float) -> int:
+    planned = (plan.get("bike_km") or 0) + (plan.get("run_km") or 0)
+    if planned <= 0:
+        return 0
+    return round((bike_actual + run_actual) / planned * 100)
+
+
+def _record_outcome(current_monday: str) -> None:
+    """Learning write: snapshot how the PREVIOUS week actually went vs its
+    plan, so future recalculations can see what ramp/deload landed well."""
+    prev = (dt.date.fromisoformat(current_monday) - dt.timedelta(days=7)).isoformat()
+    prev_plan = _plan_state["weeks"].get(prev)
+    if not prev_plan:
+        return
+    try:
+        client = get_client()
+        end = (dt.date.fromisoformat(prev) + dt.timedelta(days=6)).isoformat()
+        acts = [a for a in client.activities_in_range(prev, end) if isinstance(a, dict)]
+
+        def km(kind: str) -> float:
+            return round(sum((a.get("distance") or 0) for a in acts
+                             if kind in ((a.get("activityType") or {}).get("typeKey") or "")) / 1000, 1)
+
+        bike_actual, run_actual = km("cycling"), km("running")
+        vo2 = client.vo2max_current()
+        outcome = {
+            "week_start": prev,
+            "planned": {k: prev_plan.get(k) for k in ("bike_km", "run_km", "role", "ramp_pct", "deload_pct")},
+            "actual": {"bike_km": bike_actual, "run_km": run_actual},
+            "completion_pct": _completion_pct(prev_plan, bike_actual, run_actual),
+            "vo2_after": {"running": vo2.get("running"), "cycling": vo2.get("cycling")} if isinstance(vo2, dict) else None,
+            "vo2_projected_for_this_week": (prev_plan.get("vo2_projection") or {}).get("next_week"),
+            "recorded_at": dt.datetime.now().isoformat(timespec="seconds"),
+        }
+        _plan_state["outcomes"] = [o for o in _plan_state["outcomes"] if o.get("week_start") != prev]
+        _plan_state["outcomes"].append(outcome)
+        _plan_state["outcomes"] = _plan_state["outcomes"][-12:]
+        _save_plan_state(_plan_state)
+    except Exception:
+        pass
+
+
+@app.get("/api/plan/week")
+def plan_week(week_start: str = None, refresh: bool = False):
+    monday = _plan_monday(week_start)
+    existing = _plan_state["weeks"].get(monday)
+    if existing and not refresh:
+        return existing
+
+    client = get_client()
+    context = assemble_context(client, _plan_state, monday)
+    plan = generate_week_plan(context)
+
+    _plan_state["weeks"][monday] = plan
+    if len(_plan_state["weeks"]) > 16:                     # keep ~4 months
+        for stale in sorted(_plan_state["weeks"])[:-16]:
+            _plan_state["weeks"].pop(stale, None)
+    _save_plan_state(_plan_state)
+    return plan
+
+
+@app.post("/api/plan/recalculate")
+def plan_recalculate(body: dict = None):
+    body = body or {}
+    monday = _plan_monday(body.get("week_start"))
+    _record_outcome(monday)                                 # log how last week went first
+    return plan_week(week_start=monday, refresh=True)
+
+
+@app.get("/api/fitness")
+def fitness(refresh: bool = False):
+    key = dt.date.today().isoformat()
+    if _fitness_cache.get("key") == key and not refresh:
+        return _fitness_cache["data"]
+
+    client = get_client()
+    this_monday = _plan_monday(None)
+    next_monday = (dt.date.fromisoformat(this_monday) + dt.timedelta(days=7)).isoformat()
+    vo2_series = client.vo2max_trend(weeks=10)
+
+    data = {
+        "vo2_series": vo2_series,
+        "vo2_current": client.vo2max_current(),
+        "vo2_projection": project_vo2(vo2_series, block_meta(next_monday)["role"]),
+        "volume_12wk": client.monthly_volume(weeks=12),
+        "readiness_trend": client.readiness_trend("3month"),
+        "hrv_trend": client.hrv_trend("month"),
+        "training_load_trend": client.training_load_trend("month"),
+        "stats_today": client.stats(),
+        "block": block_meta(dt.date.today().isoformat()),
+        "generated": dt.datetime.now().isoformat(timespec="seconds"),
+    }
+    _fitness_cache.update(key=key, data=data)
+    return data
