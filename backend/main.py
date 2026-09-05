@@ -406,9 +406,21 @@ def plan_week(week_start: str = None, refresh: bool = False):
 def plan_recalculate(body: dict = None):
     body = body or {}
     monday = _plan_monday(body.get("week_start"))
+    fb = body.get("feedback")
+    if isinstance(fb, list) and fb:
+        _plan_state["feedback"] = fb[-24:]                  # RPE / feel, newest kept
+        _save_plan_state(_plan_state)
     _record_outcome(monday)                                 # log how last week went first
     _fitness_cache.clear()
     return plan_week(week_start=monday, refresh=True)
+
+
+@app.get("/api/plan/block-review")
+def plan_block_review():
+    """Claude summary of the most recently completed 4-week cycle, from the
+    outcomes log. Cached until a new week's outcome is recorded."""
+    from planner import block_review
+    return block_review(_plan_state)
 
 
 @app.post("/api/plan/adjust")

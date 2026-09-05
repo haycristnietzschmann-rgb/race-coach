@@ -155,8 +155,45 @@ def assemble_context(garmin, plan_state: dict, week_start_iso: str) -> dict:
         "readiness_trend": readiness_trend[-21:],
         "previous_week_plan": history_log.get(prev_monday),
         "recent_block_outcomes": plan_state.get("outcomes", [])[-6:],
+        "recent_session_feel": plan_state.get("feedback", [])[-16:],   # athlete RPE 1-5
         "fixed_days": FIXED_DAYS,
     }
+
+
+BLOCK_REVIEW_PROMPT = """You review a completed 4-week training cycle for one
+athlete. You get each week's plan vs actual volume, completion %, and the VO2
+max that followed, plus their session RPE ratings if any.
+
+Say plainly: did the cycle work (fitness/consistency), what specifically to keep,
+what to watch, and one concrete adjustment for the cycle just starting.
+
+Reply with ONLY JSON:
+{"cycle": int, "verdict": "2-3 sentences", "what_worked": "one line",
+ "watch_out": "one line", "adjust_next": "one imperative line"}"""
+
+
+def block_review(plan_state: dict) -> dict:
+    outcomes = plan_state.get("outcomes", [])
+    if len(outcomes) < 3:
+        return {}
+    last4 = outcomes[-4:]
+    payload = {"weeks": last4, "session_feel": plan_state.get("feedback", [])[-16:]}
+    try:
+        out = _claude_json(BLOCK_REVIEW_PROMPT, payload, max_tokens=600)
+        out.setdefault("cycle", block_meta(last4[-1]["week_start"])["cycle"])
+        return out
+    except Exception:
+        done = sum(1 for o in last4 if (o.get("completion_pct") or 0) >= 85)
+        v0 = (last4[0].get("vo2_after") or {}).get("running")
+        v1 = (last4[-1].get("vo2_after") or {}).get("running")
+        trend = (f"VO2 max {v0}→{v1}. " if v0 and v1 else "")
+        return {
+            "cycle": block_meta(last4[-1]["week_start"])["cycle"],
+            "verdict": f"{trend}Hit target volume on {done}/4 weeks.",
+            "what_worked": "Weeks you completed cleanly." if done >= 3 else "",
+            "watch_out": "Completion slipped — targets may be too high." if done < 2 else "",
+            "adjust_next": "Hold ramp rate." if done >= 3 else "Trim next week's target ~10%.",
+        }
 
 
 HEURISTIC_SESSIONS = {
