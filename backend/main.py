@@ -21,6 +21,7 @@ from planner import (
     assemble_context, generate_week_plan, adjust_week,
     block_meta, project_vo2, build_fitness,
 )
+from garmin_writer import push_workout, push_week as gc_push_week
 
 # Training goal fed to the Claude coaching prompts (morning brief + Ask Coach).
 # Falls back to the legacy RACE_GOAL env var so existing Render configs keep
@@ -457,3 +458,31 @@ def fitness(refresh: bool = False):
     data = build_fitness(get_client())
     _fitness_cache.update(key=key, data=data)
     return data
+
+
+# ---- Push structured workouts to Garmin ----
+
+@app.post("/api/garmin/push-workout")
+def garmin_push_workout(body: dict = None):
+    """Create one structured workout on Garmin (and schedule it if a date is
+    given). Body: {name, sport ('Run'|'Bike'), prescription, date?}."""
+    body = body or {}
+    return push_workout(
+        body.get("name") or "Training Coach session",
+        body.get("sport") or "Run",
+        body.get("prescription") or body.get("title") or "",
+        body.get("date"),
+    )
+
+
+@app.post("/api/garmin/push-week")
+def garmin_push_week(body: dict = None):
+    """Push every cardio session in a week's plan to Garmin. Body: {week_start}."""
+    body = body or {}
+    monday = _plan_monday(body.get("week_start"))
+    plan = _plan_state["weeks"].get(monday)
+    if not plan:
+        plan = generate_week_plan(assemble_context(get_client(), _plan_state, monday))
+        _plan_state["weeks"][monday] = plan
+        _save_plan_state(_plan_state)
+    return gc_push_week(monday, plan)

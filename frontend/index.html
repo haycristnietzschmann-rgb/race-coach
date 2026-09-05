@@ -2328,6 +2328,42 @@
       .finally(function(){ fpEngineBusy = false; renderFixedPlan(); });
   }
 
+  var fpPushState = {};   // "wk:<weekStart>" or "d:<weekStart>:<d>" -> "sending"|"done"|"error: ..."
+  function fpPushWeek() {
+    if (!liveMode) return;
+    var ws = currentPlan[activeWeekIdx].weekStart;
+    fpPushState["wk:" + ws] = "sending"; renderFixedPlan();
+    fetch(settings.apiBase + "/api/garmin/push-week", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ week_start: ws })
+    })
+      .then(function(r){ if(!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function(res){ fpPushState["wk:" + ws] = (res.pushed || 0) + "/" + (res.total || 0) + " sent to Garmin"; })
+      .catch(function(e){ fpPushState["wk:" + ws] = "error: " + e.message; })
+      .finally(function(){ renderFixedPlan(); });
+  }
+  function fpPushWorkout(weekIdx, d) {
+    if (!liveMode) return;
+    var week = currentPlan[weekIdx], dy = week.days[d];
+    var eng = dy._adjustSess || dy._engineSess || null;
+    var sess = dy.session || (dy.satChoice && dy.satChoice !== "Rest" ? { type: dy.satChoice, title: "Easy " + dy.satChoice.toLowerCase(), detail: "30–45 min easy" } : null);
+    if (!sess) return;
+    var key = "d:" + week.weekStart + ":" + d;
+    fpPushState[key] = "sending"; fpOpenDetail(weekIdx, d);
+    fetch(settings.apiBase + "/api/garmin/push-workout", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        name: dy.name + " — " + ((eng && eng.title) || sess.title),
+        sport: sess.type,
+        prescription: (eng && eng.prescription) || sess.detail || sess.title,
+        date: fpAddDays(week.weekStart, d)
+      })
+    })
+      .then(function(r){ if(!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function(res){ fpPushState[key] = res.ok ? ("On your watch ✓" + (res.scheduled ? " · scheduled " + res.scheduled : "")) : ("error: " + (res.error || "failed")); })
+      .catch(function(e){ fpPushState[key] = "error: " + e.message; })
+      .finally(function(){ fpOpenDetail(weekIdx, d); });
+  }
+
   function renderFixedPlan() {
     var week = currentPlan[activeWeekIdx];
     if (!week || !week.fixedPlan) { document.getElementById("race-content").innerHTML = ""; return; }
@@ -2385,7 +2421,11 @@
       progressBar("Bike", actuals.bikeKm, bikeTarget, "km", "var(--z4)") +
       progressBar("Run", actuals.runKm, runTarget, "km", "var(--z2)") +
       (actuals.brickKm > 0 ? '<div style="font-size:11.5px; color:var(--muted-2); margin-top:8px;">+ ' + fmtKm(actuals.brickKm) + ' from a brick/multisport activity, not split into either bar.</div>' : '') +
-      (liveMode ? '<button class="notif-btn" style="margin-top:12px; width:auto; padding:8px 14px;" onclick="fpRecalculate()"' + (fpEngineBusy ? ' disabled' : '') + '>' + (fpEngineBusy ? 'Recalculating…' : '↻ Recalculate this week') + '</button>' : '') +
+      (liveMode ? '<div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; align-items:center;">' +
+        '<button class="notif-btn" style="width:auto; padding:8px 14px;" onclick="fpRecalculate()"' + (fpEngineBusy ? ' disabled' : '') + '>' + (fpEngineBusy ? 'Recalculating…' : '↻ Recalculate this week') + '</button>' +
+        '<button class="notif-btn" style="width:auto; padding:8px 14px;" onclick="fpPushWeek()"' + (fpPushState["wk:" + week.weekStart] === "sending" ? ' disabled' : '') + '>' + (fpPushState["wk:" + week.weekStart] === "sending" ? 'Sending…' : '⌚ Push week to Garmin') + '</button>' +
+        (fpPushState["wk:" + week.weekStart] && fpPushState["wk:" + week.weekStart] !== "sending" ? '<span style="font-size:11.5px; color:' + (String(fpPushState["wk:" + week.weekStart]).indexOf("error") === 0 ? "var(--z5)" : "var(--z2)") + ';">' + fpPushState["wk:" + week.weekStart] + '</span>' : '') +
+      '</div>' : '') +
     '</div>';
 
     // ---- the fixed weekly grid ----
@@ -2533,7 +2573,13 @@
       '<div class="modal-breakdown-row"><span class="k">Duration</span><span class="v">' + (sess.duration || "—") + '</span></div>' +
       '<div class="modal-breakdown-row"><span class="k">Slot</span><span class="v">' + (dy.start || "—") + (dy.cap ? ' · ' + dy.cap : '') + '</span></div>' +
       '<button class="notif-btn" style="width:100%; margin:14px 0 0; padding:10px; border-color:' + (dy.done ? "var(--z2)" : "var(--line)") + '; color:' + (dy.done ? "var(--z2)" : "var(--muted)") + ';" onclick="fpToggleDone(' + weekIdx + ',' + d + ')">' +
-        (dy.done ? "✓ Done — tap to undo" : "Mark as done") + '</button>';
+        (dy.done ? "✓ Done — tap to undo" : "Mark as done") + '</button>' +
+      (liveMode && (dy.session || (dy.satChoice && dy.satChoice !== "Rest")) ? (function(){
+        var st = fpPushState["d:" + week.weekStart + ":" + d];
+        return '<button class="notif-btn" style="width:100%; margin:8px 0 0; padding:10px;" onclick="fpPushWorkout(' + weekIdx + ',' + d + ')"' + (st === "sending" ? ' disabled' : '') + '>' +
+          (st === "sending" ? "Sending to Garmin…" : "⌚ Send this workout to Garmin") + '</button>' +
+          (st && st !== "sending" ? '<div style="font-size:11.5px; text-align:center; margin-top:6px; color:' + (String(st).indexOf("error") === 0 ? "var(--z5)" : "var(--z2)") + ';">' + st + '</div>' : '');
+      })() : "");
     document.getElementById("option-modal").classList.add("open");
   }
 
