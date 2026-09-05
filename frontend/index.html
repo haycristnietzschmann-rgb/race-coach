@@ -162,7 +162,7 @@
   .stat .delta { font-family: 'IBM Plex Mono', monospace; font-size: 10px; margin-top: 2px; }
   .delta.up { color: var(--z2); } .delta.down { color: var(--z5); }
 
-  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 18px; margin-bottom: 20px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 15px; margin-bottom: 14px; }
   .card-title { font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center; }
   .card-title .expand-btn { font-size: 10px; color: var(--z2); cursor: pointer; background: none; border: none; font-family: 'IBM Plex Mono', monospace; letter-spacing: 0.06em; }
 
@@ -337,6 +337,7 @@
     main { padding: 14px 12px 50px; }
     .page-title { font-size: 21px; }
     .range-pills { font-size: 10px; }
+    .card { padding: 13px; margin-bottom: 11px; }
 
     .rings-row { grid-template-columns: repeat(2, 1fr); gap: 10px; }
     .ring-card { padding: 12px; gap: 10px; }
@@ -775,7 +776,7 @@
 
   function detailedChart(points, color, unit, label) {
     color = color || "var(--z2)"; unit = unit || ""; label = label || "Value";
-    var w=640,h=140,padL=34,padR=10,padT=12,padB=22, plotW=w-padL-padR, plotH=h-padT-padB;
+    var w=640,h=104,padL=30,padR=10,padT=8,padB=18, plotW=w-padL-padR, plotH=h-padT-padB;
     var vals = points.map(function(p){return p.score;}).filter(function(v){return typeof v==="number";});
     if (!vals.length) return '<div class="status" style="padding:20px;">No data for this range.</div>';
     var min=Math.min.apply(null,vals), max=Math.max.apply(null,vals), range=(max-min)||1, step=plotW/Math.max(1,points.length-1);
@@ -1288,7 +1289,7 @@
   }
   function fitnessFatigueChart(acuteLoad, chronicLoad) {
     var series = buildFitnessFatigueSeries(acuteLoad, chronicLoad);
-    var w=640,h=160,padL=34,padR=10,padT=12,padB=22, plotW=w-padL-padR, plotH=h-padT-padB;
+    var w=640,h=120,padL=30,padR=10,padT=8,padB=18, plotW=w-padL-padR, plotH=h-padT-padB;
     var allVals = series.map(function(d){return d.ctl;}).concat(series.map(function(d){return d.atl;}));
     var min=Math.min.apply(null,allVals), max=Math.max.apply(null,allVals), range=(max-min)||1;
     var step = plotW/Math.max(1,series.length-1);
@@ -2774,12 +2775,13 @@
 
     // ---- acclimatization ----
     var ac = data.acclimatization || {};
-    var acCard = (ac.heat_pct != null || ac.altitude_m != null)
-      ? '<div class="card"><div class="card-title">Acclimatization</div><div class="summary-row">' +
-          (ac.heat_pct != null ? '<div class="stat"><div class="label">Heat</div><div class="value">' + Math.round(ac.heat_pct) + '<span style="font-size:12px; color:var(--muted);">%</span></div></div>' : '') +
-          (ac.altitude_m != null ? '<div class="stat"><div class="label">Altitude</div><div class="value">' + Math.round(ac.altitude_m) + '<span style="font-size:12px; color:var(--muted);"> m</span></div></div>' : '') +
+    var acCard = (ac.heat_pct != null)
+      ? '<div class="card"><div class="card-title">Heat acclimation' + (ac.estimated ? ' — estimated' : '') + '</div>' +
+        '<div style="display:flex; align-items:baseline; gap:14px;">' +
+          '<div style="font-family:\'Bebas Neue\',sans-serif; font-size:30px; color:var(--z4);">' + Math.round(ac.heat_pct) + '<span style="font-size:14px; color:var(--muted);">%</span></div>' +
+          (ac.heat_trend ? '<div style="font-size:12px; color:var(--muted);">' + ac.heat_trend + '</div>' : '') +
         '</div>' +
-        ((ac.heat_trend || ac.altitude_trend) ? '<div style="font-size:11px; color:var(--muted-2); margin-top:6px;">Heat ' + (ac.heat_trend || "—").toLowerCase() + ', altitude ' + (ac.altitude_trend || "—").toLowerCase() + '.</div>' : '') +
+        (ac.note ? '<div style="font-size:11px; color:var(--muted-2); margin-top:6px;">' + ac.note + '</div>' : '') +
       '</div>'
       : "";
 

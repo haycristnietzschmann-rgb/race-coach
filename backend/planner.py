@@ -452,6 +452,31 @@ def estimate_pr_5k(personal_records: dict, activities: list[dict],
     }
 
 
+def estimate_heat_acclimation(activities: list[dict], today: dt.date = None) -> dict:
+    """The watch doesn't report acclimatization, so estimate heat readiness from
+    training consistency over the last 3 weeks (a well-trained aerobic system
+    carries real heat tolerance) plus the season. NOT a measured value."""
+    today = today or dt.date.today()
+    cutoff = (today - dt.timedelta(days=21)).isoformat()
+    days = set()
+    for a in activities or []:
+        d = (a.get("startTimeLocal") or "")[:10]
+        tk = (a.get("activityType") or {}).get("typeKey") or ""
+        if d >= cutoff and ("running" in tk or "cycling" in tk):
+            days.add(d)
+    consistency = min(1.0, len(days) / 14.0)
+    month_factor = {6: 1.0, 7: 1.0, 8: 1.0, 9: 0.85, 5: 0.7, 10: 0.6}.get(today.month, 0.4)
+    heat_pct = round(min(95, consistency * 100 * month_factor * 1.05))
+    return {
+        "heat_pct": heat_pct,
+        "altitude_m": None,
+        "heat_trend": "building" if consistency > 0.6 else "holding" if consistency > 0.3 else "low",
+        "estimated": True,
+        "note": (f"Estimated from {len(days)} training days in the last 3 weeks and the season "
+                 f"(month {today.month}) — your watch doesn't record acclimatization."),
+    }
+
+
 def biological_age(vo2_running, rhr, chrono_age=None) -> dict:
     """Fitness (biological) age from VO2 max, lightly adjusted by resting HR.
     ~0.4 ml/kg/min of VO2 max ≈ one year (male reference norms)."""
@@ -693,7 +718,7 @@ def build_fitness(garmin) -> dict:
         "weight_series": safe(lambda: garmin.weight_trend(weeks=12), []),
         "endurance_score": endurance,
         "hill_score": safe(lambda: garmin.hill_score(), {}),
-        "acclimatization": safe(lambda: garmin.acclimatization(), {}),
+        "acclimatization": estimate_heat_acclimation(activities),
         "training_status": ts,
         "training_status_label": ts_label,
         "acwr": acwr,
