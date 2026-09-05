@@ -382,12 +382,12 @@
     <nav>
       <button class="nav-item active" data-tab="overview"><span class="label"><span class="nav-dot"></span>Overview</span></button>
       <button class="nav-item" data-tab="training"><span class="label"><span class="nav-dot"></span>Training</span></button>
+      <button class="nav-item" data-tab="race"><span class="label"><span class="nav-dot"></span>Training Coach</span></button>
       <button class="nav-item" data-tab="fitness"><span class="label"><span class="nav-dot"></span>Fitness</span></button>
       <button class="nav-item" data-tab="sleep"><span class="label"><span class="nav-dot"></span>Sleep</span></button>
-      <button class="nav-item" data-tab="race"><span class="label"><span class="nav-dot"></span>Training Coach</span></button>
+      <button class="nav-item" data-tab="ask"><span class="label"><span class="nav-dot"></span>Ask Coach</span></button>
       <button class="nav-item" data-tab="journal"><span class="label"><span class="nav-dot"></span>Journal</span></button>
       <button class="nav-item" data-tab="archive"><span class="label"><span class="nav-dot"></span>Race Archive</span></button>
-      <button class="nav-item" data-tab="ask"><span class="label"><span class="nav-dot"></span>Ask Coach</span></button>
       <button class="nav-item" data-tab="settings"><span class="label"><span class="nav-dot"></span>Settings</span></button>
     </nav>
     <button class="notif-btn" id="refresh-btn" onclick="refreshData()">&#8635; Refresh data</button>
@@ -632,6 +632,7 @@
       loadMorningReport();
       if (document.getElementById("panel-race").classList.contains("active")) renderRaceCoach();
       if (document.getElementById("panel-fitness").classList.contains("active")) loadFitness();
+      if (document.getElementById("panel-sleep").classList.contains("active")) loadSleep();
     }).catch(function() {
       statusEl.textContent = "Couldn't reach that URL — check it's deployed and correct.";
       statusEl.style.color = "var(--z5)";
