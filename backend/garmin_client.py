@@ -162,18 +162,52 @@ class GarminClient:
         return out
 
     def hrv_trend(self, span: str = "week") -> list[dict]:
-        try:
-            start, end = self._range_dates(span)
-            return self.api.get_hrv_trend(start, end) or []
-        except Exception as e:
-            return [{"error": str(e)}]
+        """Nightly HRV average. Built day-by-day from get_hrv_data — this
+        library version has no bulk get_hrv_trend endpoint."""
+        start, end = self._range_dates(span)
+        out = []
+        d = dt.date.fromisoformat(start)
+        last = dt.date.fromisoformat(end)
+        while d <= last:
+            val = None
+            try:
+                h = self.api.get_hrv_data(d.isoformat()) or {}
+                summ = h.get("hrvSummary") or {}
+                val = summ.get("lastNightAvg") or summ.get("weeklyAvg")
+            except Exception:
+                pass
+            out.append({"date": d.isoformat(), "value": val})
+            d += dt.timedelta(days=1)
+        return out
+
+    @staticmethod
+    def _activity_load(a: dict) -> float:
+        """TRIMP-ish daily load: minutes scaled by how hard the average HR was.
+        Used because this library version has no get_training_load_trend."""
+        mins = (a.get("duration") or a.get("movingDuration") or 0) / 60.0
+        hr = a.get("averageHR") or 0
+        if mins <= 0:
+            return 0.0
+        # ~1.0x at easy aerobic (130), ~2.5x at threshold+ (170)
+        factor = 1.0 if not hr else max(0.5, min(3.0, ((hr - 100) / 30.0)))
+        return round(mins * factor, 1)
 
     def training_load_trend(self, span: str = "week") -> list[dict]:
-        try:
-            start, end = self._range_dates(span)
-            return self.api.get_training_load_trend(start, end) or []
-        except Exception as e:
-            return [{"error": str(e)}]
+        """Daily training load derived from activities."""
+        start, end = self._range_dates(span)
+        acts = [a for a in self.activities_in_range(start, end) if isinstance(a, dict)]
+        by_day: dict = {}
+        for a in acts:
+            day = (a.get("startTimeLocal") or "")[:10]
+            if day:
+                by_day[day] = by_day.get(day, 0.0) + self._activity_load(a)
+        out = []
+        d = dt.date.fromisoformat(start)
+        last = dt.date.fromisoformat(end)
+        while d <= last:
+            out.append({"date": d.isoformat(), "value": round(by_day.get(d.isoformat(), 0.0), 1)})
+            d += dt.timedelta(days=1)
+        return out
 
     # ---- Training tab: weekly calendar, summary, HR zones, volume ----
 
@@ -282,19 +316,33 @@ class GarminClient:
         return {"date": date, "running": r1(run_v), "cycling": r1(cyc_v)}
 
     def vo2max_trend(self, weeks: int = 10) -> list[dict]:
-        """One VO2 max reading per week (sampled on each week's Monday). VO2 max
-        genuinely moves slowly, so repeated values across weeks are expected."""
+        """One VO2 max reading per week, sampled at the FRESHEST day of each
+        week (its end, or today for the current week) and walking back a few
+        days if Garmin didn't stamp a value that day. Sampling Mondays made the
+        newest point stale by up to a week."""
+        today = dt.date.today()
+
+        def r1(v):
+            return round(float(v), 1) if isinstance(v, (int, float)) else None
+
         out = []
         for i in range(weeks - 1, -1, -1):
-            monday, _ = self.week_bounds(offset_weeks=-i)
+            monday, sunday = self.week_bounds(offset_weeks=-i)
+            probe = min(dt.date.fromisoformat(sunday), today)
+            floor = dt.date.fromisoformat(monday)
             run_v = cyc_v = None
-            try:
-                run_v, cyc_v = self._dig_vo2(self.api.get_max_metrics(monday))
-            except Exception:
-                pass
-            def r1(v):
-                return round(float(v), 1) if isinstance(v, (int, float)) else None
-            out.append({"week_start": monday, "running": r1(run_v), "cycling": r1(cyc_v)})
+            hit_date = None
+            while probe >= floor:
+                try:
+                    run_v, cyc_v = self._dig_vo2(self.api.get_max_metrics(probe.isoformat()))
+                except Exception:
+                    run_v = cyc_v = None
+                if run_v or cyc_v:
+                    hit_date = probe.isoformat()
+                    break
+                probe -= dt.timedelta(days=1)
+            out.append({"week_start": monday, "date": hit_date or monday,
+                        "running": r1(run_v), "cycling": r1(cyc_v)})
         return out
 
     def personal_records(self) -> dict:
@@ -338,7 +386,7 @@ class GarminClient:
         out = []
         for i in range(weeks - 1, -1, -1):
             mon, sun = self.week_bounds(offset_weeks=-i)
-            kg = None
+            kg, when = None, mon
             try:
                 wi = self.api.get_weigh_ins(mon, sun) or {}
                 allw = wi.get("dailyWeightSummaries") or wi.get("dateWeightList") or []
@@ -347,25 +395,34 @@ class GarminClient:
                     grams = last.get("weight") or (last.get("latestWeight") or {}).get("weight")
                     if grams:
                         kg = round(grams / 1000.0, 1)
+                        when = (last.get("summaryDate") or last.get("calendarDate") or mon)[:10]
             except Exception:
                 pass
-            out.append({"week_start": mon, "kg": kg})
+            out.append({"week_start": mon, "date": when, "kg": kg})
         return out
 
     def resting_hr_trend(self, weeks: int = 12) -> list[dict]:
+        """Weekly resting HR, sampled at the freshest day of each week."""
+        today = dt.date.today()
         out = []
         for i in range(weeks - 1, -1, -1):
-            mon, _ = self.week_bounds(offset_weeks=-i)
-            rhr = None
-            try:
-                d = self.api.get_rhr_day(mon) or {}
-                metrics = d.get("allMetrics", {}).get("metricsMap", {}) if isinstance(d, dict) else {}
-                arr = metrics.get("WELLNESS_RESTING_HEART_RATE") or []
-                if arr and isinstance(arr, list):
-                    rhr = arr[0].get("value")
-            except Exception:
-                pass
-            out.append({"week_start": mon, "bpm": rhr})
+            mon, sun = self.week_bounds(offset_weeks=-i)
+            probe = min(dt.date.fromisoformat(sun), today)
+            floor = dt.date.fromisoformat(mon)
+            rhr, when = None, mon
+            while probe >= floor:
+                try:
+                    d = self.api.get_rhr_day(probe.isoformat()) or {}
+                    metrics = (d.get("allMetrics") or {}).get("metricsMap") or {}
+                    arr = metrics.get("WELLNESS_RESTING_HEART_RATE") or []
+                    if arr and isinstance(arr, list) and arr[0].get("value"):
+                        rhr = arr[0]["value"]
+                        when = probe.isoformat()
+                        break
+                except Exception:
+                    pass
+                probe -= dt.timedelta(days=1)
+            out.append({"week_start": mon, "date": when, "bpm": rhr})
         return out
 
     def sleep_history(self, nights: int = 14) -> list[dict]:

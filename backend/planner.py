@@ -563,7 +563,17 @@ def composite_fitness_index(vo2_series, pace_series, rhr_series, endurance_serie
     add([{"week_start": x.get("week_start") or x.get("calendarDate"),
           "score": x.get("overallScore") or x.get("score")} for x in (endurance_series or []) if isinstance(x, dict)],
         "score", False)
-    return [{"week_start": wk, "index": round(sum(v) / len(v) * 100)} for wk, v in sorted(weeks.items()) if v]
+    today = dt.date.today()
+    out = []
+    for wk, v in sorted(weeks.items()):
+        if not v:
+            continue
+        try:
+            shown = min(dt.date.fromisoformat(wk) + dt.timedelta(days=6), today).isoformat()
+        except Exception:
+            shown = wk
+        out.append({"week_start": wk, "date": shown, "index": round(sum(v) / len(v) * 100)})
+    return out
 
 
 def pace_at_hr_series(activities: list[dict], weeks: int = 10) -> list[dict]:
@@ -579,7 +589,8 @@ def pace_at_hr_series(activities: list[dict], weeks: int = 10) -> list[dict]:
         dist = a.get("distance") or 0
         dur = a.get("movingDuration") or a.get("duration") or 0
         hr = a.get("averageHR") or a.get("avgHr")
-        if dist < 2000 or dur <= 0 or not hr or hr < 115 or hr > 160:
+        # Wide enough to catch real easy/steady runs; still excludes intervals.
+        if dist < 2000 or dur <= 0 or not hr or hr < 110 or hr > 172:
             continue
         try:
             d = dt.date.fromisoformat((a.get("startTimeLocal") or "")[:10])
@@ -587,12 +598,16 @@ def pace_at_hr_series(activities: list[dict], weeks: int = 10) -> list[dict]:
             continue
         wk = _monday(d).isoformat()
         pace = (dur / (dist / 1000.0))
-        buckets.setdefault(wk, []).append(pace * (140.0 / hr))
+        buckets.setdefault(wk, []).append((pace * (140.0 / hr), d.isoformat()))
     out = []
     for i in range(weeks - 1, -1, -1):
         wk = (this_monday - dt.timedelta(days=7 * i)).isoformat()
         vals = buckets.get(wk)
-        out.append({"week_start": wk, "sec_per_km": round(sum(vals) / len(vals)) if vals else None})
+        out.append({
+            "week_start": wk,
+            "date": max(v[1] for v in vals) if vals else wk,
+            "sec_per_km": round(sum(v[0] for v in vals) / len(vals)) if vals else None,
+        })
     return out
 
 
@@ -745,6 +760,15 @@ def build_fitness(garmin) -> dict:
     stats_today = safe(lambda: garmin.stats(), {})
 
     ts_label, acwr = _ts_summary(ts)
+    load_trend = safe(lambda: garmin.training_load_trend("3month"), [])
+    if acwr is None:
+        # Garmin doesn't expose ACWR in this API version — derive it from the
+        # daily load series (7-day sum vs the 28-day weekly average).
+        vals = [p.get("value") for p in load_trend if isinstance(p, dict) and isinstance(p.get("value"), (int, float))]
+        if len(vals) >= 28:
+            acute = sum(vals[-7:])
+            chronic = sum(vals[-28:]) / 4.0
+            acwr = round(acute / chronic, 2) if chronic else None
 
     vo2_run = vo2_current.get("running") if isinstance(vo2_current, dict) else None
     rhr_now = (stats_today or {}).get("restingHeartRate") or (rhr_series[-1]["bpm"] if rhr_series and rhr_series[-1].get("bpm") else None)
@@ -767,7 +791,7 @@ def build_fitness(garmin) -> dict:
         "training_status": ts,
         "training_status_label": ts_label,
         "acwr": acwr,
-        "training_load_trend": safe(lambda: garmin.training_load_trend("3month"), []),
+        "training_load_trend": load_trend,
         "volume_12wk": safe(lambda: garmin.monthly_volume(weeks=12), []),
         "hrv_trend": safe(lambda: garmin.hrv_trend("month"), []),
         "stats_today": stats_today,

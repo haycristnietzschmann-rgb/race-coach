@@ -2819,10 +2819,13 @@
     return m + ":" + ("0" + s).slice(-2) + "/km";
   }
 
+  // Label points by the date the reading actually came from where the backend
+  // provides it — labelling weekly series by week_start made the newest point
+  // read as days stale.
   function fitSeries(arr, key) {
     return (arr || []).map(function(p){
       var v = p && (p[key]);
-      return { date: (p && (p.week_start || p.date || p.calendarDate)) || "", score: (typeof v === "number" ? v : null) };
+      return { date: (p && (p.date || p.week_start || p.calendarDate)) || "", score: (typeof v === "number" ? v : null) };
     });
   }
   function fitHas(s) { return s.filter(function(p){ return typeof p.score === "number"; }).length >= 2; }
