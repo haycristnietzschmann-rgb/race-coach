@@ -881,13 +881,6 @@
       { k: "Training load ratio", v: Math.round(loadScore)+"/100", w: "15%" },
     ] };
   }
-  function computeStrainCustom(zoneMin) {
-    var weights = { zone1: 1, zone2: 2, zone3: 3, zone4: 4, zone5: 5 };
-    var raw = 0;
-    Object.keys(weights).forEach(function(z){ raw += (zoneMin[z]||0) * weights[z]; });
-    return Math.min(100, Math.round(raw / 4));
-  }
-
   var CUSTOM_SLEEP = computeSleepScoreCustom(REAL_TODAY);
   var CUSTOM_RECOVERY = computeRecoveryCustom(CUSTOM_SLEEP.score, REAL_TODAY.hrvOvernight, REAL_TODAY.hrvBaselineLow, REAL_TODAY.hrvBaselineHigh, REAL_TODAY.restingHR, REAL_TODAY.restingHR7dAvg, REAL_TODAY.loadRatio);
   var REAL_RECOVERY = CUSTOM_RECOVERY.score;
