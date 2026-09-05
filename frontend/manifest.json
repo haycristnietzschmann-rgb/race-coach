@@ -1,7 +1,7 @@
 {
-  "name": "Race Coach",
-  "short_name": "Coach",
-  "description": "Your daily Garmin-powered race coaching brief",
+  "name": "Training Coach",
+  "short_name": "Training",
+  "description": "Your daily Garmin-powered training coaching brief",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0b0d0f",
