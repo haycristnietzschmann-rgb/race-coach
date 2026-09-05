@@ -2264,10 +2264,81 @@
     }[meta.role];
   }
 
+  // ---- adaptive engine (backend /api/plan) ----
+  var fpEnginePlans = {};      // weekStart -> plan JSON from /api/plan/week
+  var fpAdjust = {};           // weekStart -> /api/plan/adjust result
+  var fpEngineBusy = false;
+
+  function fpLoadEngine(weekStart, force) {
+    if (!liveMode) return;
+    if (!force && fpEnginePlans[weekStart]) return;
+    fetch(settings.apiBase + "/api/plan/week?week_start=" + weekStart + (force ? "&refresh=true" : ""))
+      .then(function(r){ if(!r.ok) throw new Error("bad"); return r.json(); })
+      .then(function(p){ fpEnginePlans[weekStart] = p; if (currentPlan[activeWeekIdx] && currentPlan[activeWeekIdx].weekStart === weekStart) renderFixedPlan(); })
+      .catch(function(){ /* stay on provisional numbers */ });
+  }
+  function fpEngineSessionFor(plan, dayName) {
+    if (!plan || !plan.sessions) return null;
+    return plan.sessions.filter(function(s){ return s.day === dayName; })[0] || null;
+  }
+  function fpAdjustSessionFor(weekStart, dayName) {
+    var a = fpAdjust[weekStart];
+    if (!a || !a.adjusted_sessions) return null;
+    return a.adjusted_sessions.filter(function(s){ return s.day === dayName && s.change_note && s.change_note !== "unchanged"; })[0] || null;
+  }
+  function fpRecalculate() {
+    if (!liveMode || fpEngineBusy) return;
+    var ws = currentPlan[activeWeekIdx].weekStart;
+    fpEngineBusy = true; renderFixedPlan();
+    fetch(settings.apiBase + "/api/plan/recalculate", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ week_start: ws })
+    })
+      .then(function(r){ if(!r.ok) throw new Error("bad"); return r.json(); })
+      .then(function(p){ fpEnginePlans[ws] = p; })
+      .catch(function(){})
+      .finally(function(){ fpEngineBusy = false; renderFixedPlan(); });
+  }
+  function fpReworkWeek() {
+    if (!liveMode || fpEngineBusy) return;
+    var week = currentPlan[activeWeekIdx];
+    var ws = week.weekStart;
+    var todayD = (new Date().getDay() + 6) % 7;
+    var missed = [], completed = [], daysRemaining = [];
+    week.days.forEach(function(dy, i) {
+      var es = fpEngineSessionFor(fpEnginePlans[ws], dy.name);
+      var label = es ? (es.title + (es.prescription ? " — " + es.prescription : "")) : (dy.session ? dy.session.title : "");
+      if (fpDayCardioType(dy)) {
+        if (dy.missed) missed.push({ day: dy.name, type: (dy.session||{}).type || (es||{}).type, title: (es||{}).title || (dy.session||{}).title, prescription: (es||{}).prescription || "", intensity: (es||{}).intensity || (dy.session||{}).intensity });
+        else if (dy.done) completed.push({ day: dy.name, title: label });
+        if (i > todayD) daysRemaining.push(dy.name);
+      } else if (dy.slotKey === "sat-choice" && i > todayD) {
+        daysRemaining.push("Sat");
+      }
+    });
+    if (!missed.length) return;
+    fpEngineBusy = true; renderFixedPlan();
+    fetch(settings.apiBase + "/api/plan/adjust", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ week_start: ws, missed: missed, completed: completed, days_remaining: daysRemaining })
+    })
+      .then(function(r){ if(!r.ok) throw new Error("bad"); return r.json(); })
+      .then(function(res){ fpAdjust[ws] = res; })
+      .catch(function(){})
+      .finally(function(){ fpEngineBusy = false; renderFixedPlan(); });
+  }
+
   function renderFixedPlan() {
     var week = currentPlan[activeWeekIdx];
     if (!week || !week.fixedPlan) { document.getElementById("race-content").innerHTML = ""; return; }
     fpProcessCompletion(week);
+    var curMonday = fpIso(fpMonday(new Date()));
+    // Only auto-generate engine plans for the current + next week (each is a
+    // Claude call); older/further weeks stay on provisional numbers unless
+    // Recalculate is pressed.
+    if (week.weekStart === curMonday || week.weekStart === fpAddDays(curMonday, 7)) fpLoadEngine(week.weekStart);
+    var enginePlan = fpEnginePlans[week.weekStart] || null;
+    var adjustRes = fpAdjust[week.weekStart] || null;
 
     var meta = week.meta;
     var todayIso = fpIso(new Date());
@@ -2296,23 +2367,40 @@
     var blockCardHtml = '<div class="card"><div class="card-title">Training blocks — rolling 4-week cycle</div>' +
       '<div class="week-tabs">' + tabsHtml + '</div></div>';
 
-    // ---- provisional volume ----
+    // ---- volume: engine numbers when available, else provisional defaults ----
     var actuals = computeWeekActuals(week);
-    var volHtml = '<div class="card"><div class="card-title">This week\'s volume — provisional</div>' +
-      '<div style="font-size:11.5px; color:var(--muted); margin-bottom:12px; padding:8px 10px; background:var(--surface-2); border-radius:6px;">' +
-        'Default targets for a ' + fpRoleLabel(meta.role) + ' week on a ' + meta.focus + '-focus cycle. The adaptive engine (next build step) will replace these with numbers calculated from your last ~12 weeks of Garmin data, recovery trend, and how past blocks went.</div>' +
-      progressBar("Bike", actuals.bikeKm, week.volume.bike, "km", "var(--z4)") +
-      progressBar("Run", actuals.runKm, week.volume.run, "km", "var(--z2)") +
+    var bikeTarget = enginePlan && enginePlan.bike_km != null ? enginePlan.bike_km : week.volume.bike;
+    var runTarget = enginePlan && enginePlan.run_km != null ? enginePlan.run_km : week.volume.run;
+    var volTitle = enginePlan ? "This week's volume — adaptive" : "This week's volume — provisional";
+    var volNote = enginePlan
+      ? '<div style="font-size:11.5px; color:var(--muted); margin-bottom:12px; padding:8px 10px; background:var(--surface-2); border-radius:6px;">' +
+          '<strong style="color:var(--z2);">' + (enginePlan.source === "claude" ? "Adaptive" : "Heuristic") + ':</strong> ' +
+          (enginePlan.ramp_pct != null ? 'ramp +' + enginePlan.ramp_pct + '% from last week. ' : '') +
+          (enginePlan.deload_pct != null ? 'deload &minus;' + enginePlan.deload_pct + '% vs the peak week. ' : '') +
+          (enginePlan.rationale || '') + '</div>'
+      : '<div style="font-size:11.5px; color:var(--muted); margin-bottom:12px; padding:8px 10px; background:var(--surface-2); border-radius:6px;">' +
+          'Default targets for a ' + fpRoleLabel(meta.role) + ' week on a ' + meta.focus + '-focus cycle' +
+          (liveMode ? ' — the adaptive engine is loading real numbers from your Garmin history.' : '. Connect your backend for adaptive targets.') + '</div>';
+    var volHtml = '<div class="card"><div class="card-title">' + volTitle + '</div>' + volNote +
+      progressBar("Bike", actuals.bikeKm, bikeTarget, "km", "var(--z4)") +
+      progressBar("Run", actuals.runKm, runTarget, "km", "var(--z2)") +
       (actuals.brickKm > 0 ? '<div style="font-size:11.5px; color:var(--muted-2); margin-top:8px;">+ ' + fmtKm(actuals.brickKm) + ' from a brick/multisport activity, not split into either bar.</div>' : '') +
+      (liveMode ? '<button class="notif-btn" style="margin-top:12px; width:auto; padding:8px 14px;" onclick="fpRecalculate()"' + (fpEngineBusy ? ' disabled' : '') + '>' + (fpEngineBusy ? 'Recalculating…' : '↻ Recalculate this week') + '</button>' : '') +
     '</div>';
 
     // ---- the fixed weekly grid ----
+    week.days.forEach(function(dy) {
+      dy._engineSess = fpEngineSessionFor(enginePlan, dy.name);
+      dy._adjustSess = fpAdjustSessionFor(week.weekStart, dy.name);
+    });
     var gridHtml = "";
     for (var d = 0; d < 7; d++) {
       var dy = week.days[d];
       var dayIso = fpAddDays(week.weekStart, d);
       var isToday = d === todayD;
       var chips = "";
+      var engTitle = dy._adjustSess ? (dy._adjustSess.title || "") : (dy._engineSess ? (dy._engineSess.title || "") : "");
+      var engPresc = dy._adjustSess ? (dy._adjustSess.prescription || "") : (dy._engineSess ? (dy._engineSess.prescription || "") : "");
 
       if (dy.lift) {
         chips += '<div class="cal-chip locked"><span class="ctype" style="color:var(--muted);">Strength</span>' +
@@ -2336,9 +2424,12 @@
       } else if (dy.session) {
         var cls = dy.missed ? "missed-chip" : (dy.done ? "done-chip" : "");
         var col = workoutTypeColor[dy.session.type] || "var(--muted)";
+        var chipTitle = engTitle ? engTitle.replace(/^(Run|Bike) — /, "") : dy.session.title.replace(/^(Run|Bike) — /, "");
         chips += '<div class="cal-chip ' + cls + '" style="cursor:pointer;" onclick="fpOpenDetail(' + activeWeekIdx + ',' + d + ')">' +
-          '<span class="ctype" style="color:' + col + ';">' + dy.session.type + (dy.done ? " ✓" : "") + (dy.missed ? " ✗" : "") + '</span>' +
-          '<span class="ctitle">' + dy.session.title.replace(/^(Run|Bike) — /, "") + '</span></div>';
+          '<span class="ctype" style="color:' + col + ';">' + dy.session.type + (dy.done ? " ✓" : "") + (dy.missed ? " ✗" : "") + (dy._adjustSess ? " ⟳" : "") + '</span>' +
+          '<span class="ctitle">' + chipTitle + '</span>' +
+          (engPresc ? '<span style="font-size:9px; color:var(--muted-2); display:block; margin-top:2px;">' + engPresc + '</span>' : '') +
+        '</div>';
       }
 
       gridHtml += '<div class="cal-day ' + (dy.slotKey === "cardio-rest" ? "rest" : "") + '" style="' + (isToday ? "border-color:var(--z2);" : "") + '">' +
@@ -2358,16 +2449,34 @@
       if (fpDayCardioType(dy)) { planned++; if (dy.done) done++; else if (dy.missed) missed++; }
     });
     var upcoming = planned - done - missed;
+    var canRework = liveMode && missed > 0 && isCurrentWeek;
     var reviewHtml = '<div class="card"><div class="card-title">This week</div>' +
       '<div class="summary-row">' +
         '<div class="stat"><div class="label">Cardio done</div><div class="value" style="color:var(--z2);">' + done + '</div></div>' +
         '<div class="stat"><div class="label">Missed</div><div class="value" style="color:' + (missed > 0 ? "var(--z5)" : "var(--text)") + ';">' + missed + '</div></div>' +
         '<div class="stat"><div class="label">Upcoming</div><div class="value">' + upcoming + '</div></div>' +
         '<div class="stat"><div class="label">Planned</div><div class="value">' + planned + '</div></div>' +
-      '</div></div>';
+      '</div>' +
+      (canRework ? '<button class="notif-btn" style="margin-top:12px; width:auto; padding:8px 14px;" onclick="fpReworkWeek()"' + (fpEngineBusy ? ' disabled' : '') + '>' + (fpEngineBusy ? 'Reworking…' : '↻ Rework the rest of this week') + '</button>' : '') +
+    '</div>';
+
+    var adjustHtml = "";
+    if (adjustRes && (adjustRes.adjusted_sessions || adjustRes.dropped)) {
+      var moved = (adjustRes.adjusted_sessions || []).filter(function(s){ return s.change_note && s.change_note !== "unchanged"; });
+      adjustHtml = '<div class="card" style="border-color:var(--z3);"><div class="card-title">Reworked around missed sessions</div>' +
+        '<p style="font-size:12.5px; color:var(--text); line-height:1.5; margin:0 0 10px;">' + (adjustRes.rationale || "") + '</p>' +
+        moved.map(function(s){
+          return '<div class="modal-breakdown-row"><span class="k">' + s.day + ' &middot; ' + (s.title || s.type || "") + '</span><span class="v">' + (s.prescription || "") + '</span></div>' +
+            (s.change_note ? '<div style="font-size:11px; color:var(--z3); margin:-2px 0 8px;">' + s.change_note + '</div>' : '');
+        }).join("") +
+        (adjustRes.dropped || []).map(function(dp){
+          return '<div style="font-size:11.5px; color:var(--muted-2); margin-top:4px;">Dropped — ' + (dp.day || "") + ' ' + (dp.title || "") + ': ' + (dp.reason || "") + '</div>';
+        }).join("") +
+      '</div>';
+    }
 
     document.getElementById("race-content").innerHTML =
-      headerHtml + blockCardHtml + volHtml + gridCardHtml + reviewHtml;
+      headerHtml + blockCardHtml + volHtml + gridCardHtml + reviewHtml + adjustHtml;
     fpSave();
   }
 
@@ -2397,6 +2506,14 @@
         "Optional recovery — skip it entirely if recovery is low or the week's load is already high.", "Easy");
     }
     if (!sess) return;
+    var eng = dy._adjustSess || dy._engineSess || null;
+    var engHtml = eng
+      ? '<div class="modal-coach" style="border-left-color:var(--z3);"><span class="modal-coach-icon">▲</span><div>' +
+          '<span class="modal-coach-label" style="color:var(--z3);">' + (dy._adjustSess ? "Reworked by the coach" : "This week from the adaptive engine") + '</span>' +
+          (eng.title ? '<strong>' + eng.title + '</strong><br>' : '') +
+          (eng.prescription || '') + (eng.change_note && eng.change_note !== "unchanged" ? '<br><em style="color:var(--z3);">' + eng.change_note + '</em>' : '') +
+        '</div></div>'
+      : "";
     var dateStr = new Date(fpAddDays(week.weekStart, d) + "T00:00:00").toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' });
     var col = workoutTypeColor[sess.type] || "var(--muted)";
     var banner = dy.autoDetected
@@ -2407,10 +2524,10 @@
       ? '<div class="modal-coach" style="border-left-color:var(--z5);"><span class="modal-coach-icon">⚠️</span><div><span class="modal-coach-label" style="color:var(--z5);">Missed</span>This day has passed with no matching Garmin activity.</div></div>'
       : "";
     document.getElementById("option-modal-card").innerHTML =
-      '<button class="modal-close" onclick="closeOptionModal()">&times;</button>' + banner +
+      '<button class="modal-close" onclick="closeOptionModal()">&times;</button>' + banner + engHtml +
       '<div class="modal-title" style="color:' + col + ';">' + dy.name + ' · ' + dateStr + (dy.lift ? ' · after ' + dy.lift : '') + '</div>' +
-      '<div class="modal-value" style="font-size:22px; margin-bottom:8px;">' + sess.title + '</div>' +
-      '<p class="modal-explanation" style="margin-bottom:14px;">' + sess.detail + '</p>' +
+      '<div class="modal-value" style="font-size:22px; margin-bottom:8px;">' + ((eng && eng.title) || sess.title) + '</div>' +
+      '<p class="modal-explanation" style="margin-bottom:14px;">' + ((eng && eng.prescription) || sess.detail) + '</p>' +
       (sess.why ? '<div class="modal-breakdown-title">Why this session</div><p class="modal-explanation" style="margin-bottom:14px;">' + sess.why + '</p>' : '') +
       '<div class="modal-breakdown-row"><span class="k">Effort</span><span class="v">' + (sess.effort || "—") + '</span></div>' +
       '<div class="modal-breakdown-row"><span class="k">Duration</span><span class="v">' + (sess.duration || "—") + '</span></div>' +
@@ -2456,35 +2573,84 @@
     return (d > 0 ? "+" : "") + d;
   }
 
+  function fmtClock(sec) {
+    if (typeof sec !== "number" || sec <= 0) return "—";
+    sec = Math.round(sec);
+    var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    return (h ? h + ":" + ("0" + m).slice(-2) : m) + ":" + ("0" + s).slice(-2);
+  }
+  function paceStr(secPerKm) {
+    if (typeof secPerKm !== "number" || secPerKm <= 0) return "—";
+    var m = Math.floor(secPerKm / 60), s = Math.round(secPerKm % 60);
+    return m + ":" + ("0" + s).slice(-2) + "/km";
+  }
+
   function renderFitness(data) {
     var series = (data.vo2_series || []).map(function(p){ return { date: p.week_start, score: (typeof p.running === "number" ? p.running : null) }; });
-    var bikeSeries = (data.vo2_series || []).map(function(p){ return { date: p.week_start, score: (typeof p.cycling === "number" ? p.cycling : null) }; });
     var proj = data.vo2_projection || {};
     var cur = data.vo2_current || {};
     var blk = data.block || {};
+    var hasVo2Series = series.filter(function(p){ return typeof p.score === "number"; }).length >= 2;
 
     var blockLine = blk.role
       ? '<div style="font-family:\'IBM Plex Mono\',monospace; font-size:10px; color:var(--muted-2); text-transform:uppercase; margin-bottom:10px;">Cycle ' + blk.cycle + ' &middot; Week ' + blk.week_in_cycle + ' &middot; ' + blk.role + ' &middot; ' + blk.focus + '-focus</div>'
       : '';
 
+    // ---- 5K estimate + projection (prominent) ----
+    var e5 = data.estimate_5k || {};
+    var preds = data.race_predictions || {};
+    var predRow = ["10K", "half", "marathon"].map(function(k) {
+      var lbl = k === "half" ? "Half" : k === "marathon" ? "Marathon" : k;
+      return typeof preds[k] === "number"
+        ? '<div style="text-align:center;"><div style="font-family:\'Bebas Neue\',sans-serif; font-size:19px;">' + fmtClock(preds[k]) + '</div><div style="font-size:10px; color:var(--muted-2);">' + lbl + '</div></div>'
+        : "";
+    }).join("");
+    var e5delta = typeof e5.delta_sec === "number" ? e5.delta_sec : null;
+    var fiveKCard =
+      '<div class="card"><div class="card-title">5K — estimate &amp; 4-week projection</div>' + blockLine +
+      (e5.current_str
+        ? '<div style="display:flex; align-items:baseline; gap:12px; flex-wrap:wrap;">' +
+            '<div><div style="font-family:\'Bebas Neue\',sans-serif; font-size:34px;">' + e5.current_str + '</div><div style="font-size:10.5px; color:var(--muted);">now &middot; ' + (e5.source || "") + '</div></div>' +
+            '<div style="font-size:20px; color:' + (e5delta > 0 ? "var(--z2)" : e5delta < 0 ? "var(--z5)" : "var(--muted-2)") + ';">&rarr;</div>' +
+            '<div><div style="font-family:\'Bebas Neue\',sans-serif; font-size:34px; color:' + (e5delta > 0 ? "var(--z2)" : "var(--text)") + ';">' + (e5.projection_4wk_str || "—") + '</div>' +
+              '<div style="font-size:10.5px; color:var(--muted);">in 4 weeks' + (e5delta != null ? ' &middot; ' + (e5delta >= 0 ? "&minus;" : "+") + Math.abs(e5delta) + 's' : '') + '</div></div>' +
+          '</div>' +
+          (predRow ? '<div style="display:flex; gap:18px; margin-top:12px; padding-top:10px; border-top:1px solid var(--line);">' + predRow + '</div>' : '') +
+          '<p style="font-size:11.5px; color:var(--muted); line-height:1.55; margin:10px 0 0;">' + (e5.rationale || "") + '</p>'
+        : '<p style="font-size:12.5px; color:var(--muted);">No recent runs to estimate a 5K from yet — do a run of 3 km+ and this fills in.</p>') +
+    '</div>';
+
     // ---- VO2 max + clickable trend ----
     var runNow = (typeof cur.running === "number") ? cur.running : (proj.current || "—");
     var bikeNow = (typeof cur.cycling === "number") ? cur.cycling : "—";
     var vo2Card =
-      '<div class="card"><div class="card-title">VO2 max</div>' + blockLine +
+      '<div class="card"><div class="card-title">VO2 max</div>' +
       '<div style="display:flex; gap:22px; flex-wrap:wrap; margin-bottom:6px;">' +
         '<div><div style="font-family:\'Bebas Neue\',sans-serif; font-size:30px; color:var(--z2);">' + runNow + '</div><div style="font-size:11px; color:var(--muted);">Running</div></div>' +
         '<div><div style="font-family:\'Bebas Neue\',sans-serif; font-size:30px; color:var(--z4);">' + bikeNow + '</div><div style="font-size:11px; color:var(--muted);">Cycling</div></div>' +
       '</div>' +
-      '<div onclick="openVo2Projection()" style="cursor:pointer; border:1px solid var(--line); border-radius:8px; padding:8px 6px 2px; transition:border-color .15s;" onmouseover="this.style.borderColor=\'var(--z2)\'" onmouseout="this.style.borderColor=\'var(--line)\'">' +
-        detailedChart(series.length ? series : [{date:"—",score:null}], "var(--z2)", "", "VO2 (run)") +
-        '<div style="text-align:center; font-size:10.5px; color:var(--z2); padding:4px 0 6px;">Tap for next week’s projection &rsaquo;</div>' +
-      '</div>' +
-      '<div style="display:flex; justify-content:space-between; margin-top:10px; font-size:12.5px;">' +
-        '<span style="color:var(--muted);">Projected next week</span>' +
-        '<span style="color:var(--text);"><strong>' + (proj.next_week != null ? proj.next_week : "—") + '</strong> ' +
-          '<span style="color:' + (proj.delta > 0 ? "var(--z2)" : proj.delta < 0 ? "var(--z5)" : "var(--muted-2)") + ';">(' + fmtDelta(proj.delta) + ')</span></span>' +
-      '</div></div>';
+      (hasVo2Series
+        ? '<div onclick="openVo2Projection()" style="cursor:pointer; border:1px solid var(--line); border-radius:8px; padding:8px 6px 2px; transition:border-color .15s;" onmouseover="this.style.borderColor=\'var(--z2)\'" onmouseout="this.style.borderColor=\'var(--line)\'">' +
+            detailedChart(series, "var(--z2)", "", "VO2 (run)") +
+            '<div style="text-align:center; font-size:10.5px; color:var(--z2); padding:4px 0 6px;">Tap for next week’s projection &rsaquo;</div>' +
+          '</div>' +
+          '<div style="display:flex; justify-content:space-between; margin-top:10px; font-size:12.5px;">' +
+            '<span style="color:var(--muted);">Projected next week</span>' +
+            '<span style="color:var(--text);"><strong>' + (proj.next_week != null ? proj.next_week : "—") + '</strong> ' +
+              '<span style="color:' + (proj.delta > 0 ? "var(--z2)" : proj.delta < 0 ? "var(--z5)" : "var(--muted-2)") + ';">(' + fmtDelta(proj.delta) + ')</span></span>' +
+          '</div>'
+        : '<p style="font-size:11.5px; color:var(--muted-2); margin:4px 0 0;">Garmin hasn’t logged enough weekly VO2 max points for a trend chart yet. The current values above are live; the projection needs a few weeks of history.</p>') +
+      '</div>';
+
+    // ---- pace at HR (efficiency) ----
+    var pahr = (data.pace_at_hr_series || []).map(function(p){ return { date: p.week_start, score: (typeof p.sec_per_km === "number" ? p.sec_per_km : null) }; });
+    var pahrHas = pahr.filter(function(p){ return typeof p.score === "number"; }).length >= 2;
+    var pahrCard = '<div class="card"><div class="card-title">Aerobic efficiency — easy pace at HR 140</div>' +
+      (pahrHas
+        ? detailedChart(pahr, "var(--z1)", "", "sec/km @140") +
+          '<div style="font-size:11px; color:var(--muted-2); margin-top:6px;">Lower = faster at the same effort. Latest ≈ ' + paceStr(pahr.filter(function(p){return typeof p.score==="number";}).slice(-1)[0].score) + '.</div>'
+        : '<p style="font-size:11.5px; color:var(--muted-2);">Needs a few easy runs (HR ~115–160) to chart — hard/interval runs are excluded on purpose.</p>') +
+      '</div>';
 
     // ---- weekly volume, 12wk ----
     var vol = (data.volume_12wk || []).filter(function(w){ return w && typeof w === "object"; });
@@ -2507,14 +2673,22 @@
       return '<div class="card"><div class="card-title">' + title + '</div>' + detailedChart(mapped.length ? mapped : [{date:"—",score:null}], color, unit || "", label || title) + '</div>';
     }
     var rhr = (data.stats_today && (data.stats_today.restingHeartRate || data.stats_today.restingHR)) || null;
-    var rhrLine = rhr ? '<div class="card"><div class="card-title">Resting HR (today)</div><div style="font-family:\'Bebas Neue\',sans-serif; font-size:30px;">' + rhr + ' <span style="font-size:13px; color:var(--muted);">bpm</span></div></div>' : "";
+    var ftp = data.ftp || null;
+    var quickStats = (rhr || ftp)
+      ? '<div class="card"><div class="card-title">Also worth a look</div><div class="summary-row">' +
+          (rhr ? '<div class="stat"><div class="label">Resting HR</div><div class="value">' + rhr + '<span style="font-size:12px; color:var(--muted);"> bpm</span></div></div>' : '') +
+          (ftp ? '<div class="stat"><div class="label">FTP</div><div class="value">' + ftp + '<span style="font-size:12px; color:var(--muted);"> W</span></div></div>' : '') +
+        '</div></div>'
+      : "";
 
-    return vo2Card +
+    return fiveKCard +
+      vo2Card +
+      pahrCard +
       volCard +
       trendCard("Readiness — 3 months", data.readiness_trend, "var(--z2)", "", "Readiness") +
       trendCard("HRV — last month", data.hrv_trend, "var(--z1)", "ms", "HRV") +
       trendCard("Training load — last month", data.training_load_trend, "var(--z3)", "", "Load") +
-      rhrLine +
+      quickStats +
       '<div style="font-size:10.5px; color:var(--muted-2); text-align:center; margin-top:4px;">Updated ' + (data.generated || "").slice(0,16).replace("T"," ") + '</div>';
   }
 
