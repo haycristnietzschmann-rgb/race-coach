@@ -345,6 +345,25 @@ class GarminClient:
                         "running": r1(run_v), "cycling": r1(cyc_v)})
         return out
 
+    def vo2max_daily(self, days: int = 30) -> list[dict]:
+        """Every day Garmin actually stamped a running VO2 max in the window
+        (Garmin only writes one every 1-3 days, so gaps are normal)."""
+        today = dt.date.today()
+        out = []
+        for i in range(days - 1, -1, -1):
+            d = (today - dt.timedelta(days=i)).isoformat()
+            try:
+                run_v, cyc_v = self._dig_vo2(self.api.get_max_metrics(d))
+            except Exception:
+                run_v = cyc_v = None
+            if isinstance(run_v, (int, float)) or isinstance(cyc_v, (int, float)):
+                out.append({
+                    "date": d,
+                    "running": round(float(run_v), 1) if isinstance(run_v, (int, float)) else None,
+                    "cycling": round(float(cyc_v), 1) if isinstance(cyc_v, (int, float)) else None,
+                })
+        return out
+
     def personal_records(self) -> dict:
         """Personal records keyed by a readable label, seconds for time PRs."""
         try:

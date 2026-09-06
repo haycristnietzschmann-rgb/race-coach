@@ -510,7 +510,7 @@
 
       <div class="card">
         <div class="card-title">Live data connection</div>
-        <p style="font-size:12.5px; color:var(--muted); margin:0 0 12px;">Point this at your deployed backend to pull live Garmin data, get a real morning report, and chat with the live Claude coach. Leave blank to keep using the built-in offline snapshot.</p>
+        <p style="font-size:12.5px; color:var(--muted); margin:0 0 12px;">This app is served by its own backend, so live Garmin data works out of the box — leave this blank. Only fill it in if you're running the page separately and need to point it at a different backend URL.</p>
         <div style="display:flex; gap:8px;">
           <input type="text" id="api-base-input" placeholder="https://your-backend.onrender.com" style="flex:1; background:var(--surface-2); border:1px solid var(--line); border-radius:6px; padding:9px 12px; color:var(--text); font-family:'IBM Plex Mono',monospace; font-size:12px;"/>
           <button class="notif-btn" style="width:auto; margin:0; padding:9px 16px;" onclick="saveApiBase()">Connect</button>
@@ -571,9 +571,14 @@
       </div>
 
       <div class="card">
-        <div class="card-title">Export</div>
-        <p style="font-size:12.5px; color:var(--muted); margin:0 0 12px;">Download everything this app has stored locally — your schedule, session feel/RPE, journal, race archive, settings — as one JSON file.</p>
-        <button class="notif-btn" style="width:auto; padding:9px 16px;" onclick="exportData()">&#8681; Export my data (JSON)</button>
+        <div class="card-title">Export &amp; import</div>
+        <p style="font-size:12.5px; color:var(--muted); margin:0 0 12px;">Your schedule, session feel/RPE, journal, race archive and settings are stored in this browser, under this web address. Export them to a file to back them up — or to carry them to a different address (they don't move on their own).</p>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button class="notif-btn" style="width:auto; padding:9px 16px; margin:0;" onclick="exportData()">&#8681; Export (JSON)</button>
+          <button class="notif-btn" style="width:auto; padding:9px 16px; margin:0;" onclick="document.getElementById('import-file').click()">&#8679; Import from file</button>
+          <input type="file" id="import-file" accept="application/json,.json" style="display:none;" onchange="importData(this)"/>
+        </div>
+        <div id="import-status" style="font-size:11.5px; margin-top:8px; color:var(--muted);"></div>
       </div>
     </section>
   </main>
@@ -627,9 +632,13 @@
     homeLat: saved.homeLat || "",
     homeLon: saved.homeLon || "",
   };
-  var liveMode = !!settings.apiBase;
-  // Live data fetched from the backend, once connected — used to override
-  // the baked-in snapshot wherever it exists.
+  // The app is served BY the backend now, so an empty apiBase means
+  // same-origin ("/api/...") — which is the normal case, not "offline".
+  // A non-empty value is only for pointing a local build at a remote backend.
+  var liveMode = true;
+  // Live data fetched from the backend — used to override the baked-in
+  // snapshot wherever it exists. If a call fails (e.g. the free-tier backend
+  // is still waking up) each loader falls back to the snapshot on its own.
   var liveToday = null;
   function getCurrentRecovery() { return (liveMode && liveToday && typeof liveToday.readiness === "number") ? liveToday.readiness : REAL_RECOVERY; }
   function getCurrentVO2Max() { return (liveMode && liveToday && typeof liveToday.vo2Max === "number") ? liveToday.vo2Max : REAL_TODAY.vo2Max; }
@@ -637,11 +646,10 @@
   function saveApiBase() {
     var val = document.getElementById("api-base-input").value.trim().replace(/\/$/, "");
     settings.apiBase = val;
-    liveMode = !!val;
+    liveMode = true;                       // empty = same origin, still live
     saveSettings();
     var statusEl = document.getElementById("api-base-status");
-    if (!val) { statusEl.textContent = "Disconnected — using the offline snapshot."; statusEl.style.color = "var(--muted)"; return; }
-    statusEl.textContent = "Connecting…"; statusEl.style.color = "var(--muted)";
+    statusEl.textContent = "Checking…"; statusEl.style.color = "var(--muted)";
     fetch(val + "/api/health").then(function(r) {
       if (!r.ok) throw new Error("bad status");
       statusEl.textContent = "Connected — live data active.";
@@ -653,9 +661,10 @@
       if (document.getElementById("panel-fitness").classList.contains("active")) loadFitness();
       if (document.getElementById("panel-sleep").classList.contains("active")) loadSleep();
     }).catch(function() {
-      statusEl.textContent = "Couldn't reach that URL — check it's deployed and correct.";
+      statusEl.textContent = val
+        ? "Couldn't reach that URL — check it's deployed and correct."
+        : "Backend didn't answer — it may still be waking up. Try Refresh in a moment.";
       statusEl.style.color = "var(--z5)";
-      liveMode = false;
     });
   }
 
@@ -673,6 +682,48 @@
     a.download = "training-coach-export-" + new Date().toISOString().slice(0, 10) + ".json";
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
+  }
+
+  // Restore an export onto this origin. localStorage is per-web-address, so
+  // this is how data follows you when the app moves to a new URL.
+  var IMPORTABLE_KEYS = ["training_coach_fixed_v1", "race_coach_settings_v1", "race_coach_journal_v1",
+    "race_coach_archive_v1", "race_coach_plan_palma_v1", "race_coach_plan_general_v1", "race_coach_race_notes"];
+  function importData(input) {
+    var el = document.getElementById("import-status");
+    var file = input && input.files && input.files[0];
+    if (!file) return;
+    var done = function(cls) { input.value = ""; el.style.color = cls; };
+    var reader = new FileReader();
+    reader.onload = function() {
+      var dump;
+      try { dump = JSON.parse(reader.result); }
+      catch (e) { el.textContent = "That file isn't valid JSON."; done("var(--z5)"); return; }
+      var data = (dump && dump.data) || {};
+      var keys = Object.keys(data).filter(function(k){ return IMPORTABLE_KEYS.indexOf(k) !== -1; });
+      if (!keys.length) { el.textContent = "No Training Coach data found in that file."; done("var(--z5)"); return; }
+      if (!confirm("Replace this browser's Training Coach data (schedule, journal, settings, etc.) with the " + keys.length + " item(s) in this file? Current data on this device will be overwritten.")) {
+        el.textContent = "Import cancelled."; done("var(--muted)"); return;
+      }
+      var restored = 0, failed = 0;
+      keys.forEach(function(k) {
+        try {
+          var v = data[k];
+          if (k === "race_coach_settings_v1" && v && typeof v === "object") { delete v.apiBase; }  // stay same-origin
+          localStorage.setItem(k, typeof v === "string" ? v : JSON.stringify(v));
+          restored++;
+        } catch (e) { failed++; }
+      });
+      if (restored && !failed) {
+        el.textContent = "Restored " + restored + " item(s). Reloading…";
+        el.style.color = "var(--z2)"; input.value = "";
+        setTimeout(function(){ location.reload(); }, 1200);   // reload before any autosave can clobber it
+      } else {
+        el.textContent = "Restored " + restored + ", " + failed + " failed (storage full?). Not reloading — export first, then retry.";
+        done(failed === keys.length ? "var(--z5)" : "var(--z4)");
+      }
+    };
+    reader.onerror = function() { el.textContent = "Couldn't read that file."; done("var(--z5)"); };
+    reader.readAsText(file);
   }
 
   function saveHomeLocation() {
@@ -2775,6 +2826,8 @@
   // FITNESS TAB — VO2 max, speed/recovery trends, next-week projection
   // ============================================================
   var lastFitness = null;
+  var vo2Res = "weekly";                 // "weekly" | "daily" — VO2 chart resolution
+  function setVo2Res(r) { vo2Res = r; if (lastFitness) document.getElementById("fitness-content").innerHTML = renderFitness(lastFitness); }
 
   function loadFitness() {
     var el = document.getElementById("fitness-content");
@@ -2902,23 +2955,31 @@
     '</div>';
 
     // ---- VO2 max ----
-    var vo2S = fitSeries(data.vo2_series, "running");
+    var vo2Weekly = fitSeries(data.vo2_series, "running");
+    var vo2Daily = fitSeries(data.vo2_daily, "running");
+    var vo2S = (vo2Res === "daily" && fitHas(vo2Daily)) ? vo2Daily : vo2Weekly;
     var cur = data.vo2_current || {};
     var proj = data.vo2_projection || {};
     var runNow = (typeof cur.running === "number") ? cur.running : (typeof proj.current === "number" ? proj.current : "—");
     var bikeNow = (typeof cur.cycling === "number") ? cur.cycling : "—";
+    var vo2Toggle = fitHas(vo2Daily)
+      ? '<div style="display:flex; gap:4px; margin-bottom:8px;">' +
+          ['weekly', 'daily'].map(function(r){
+            return '<button onclick="setVo2Res(\'' + r + '\')" style="font-size:10px; padding:4px 10px; border-radius:6px; border:1px solid ' + (vo2Res === r ? 'var(--z2)' : 'var(--line)') + '; background:' + (vo2Res === r ? 'rgba(61,220,151,0.12)' : 'var(--surface-2)') + '; color:' + (vo2Res === r ? 'var(--z2)' : 'var(--muted)') + '; cursor:pointer; text-transform:capitalize;">' + r + '</button>';
+          }).join("") + '</div>'
+      : '';
     var vo2Card = '<div class="card"><div class="card-title">VO2 max</div>' +
       '<div style="display:flex; gap:22px; flex-wrap:wrap; margin-bottom:6px;">' +
         '<div><div style="font-family:\'Bebas Neue\',sans-serif; font-size:30px; color:var(--z2);">' + runNow + '</div><div style="font-size:11px; color:var(--muted);">Running</div></div>' +
         '<div><div style="font-family:\'Bebas Neue\',sans-serif; font-size:30px; color:var(--z4);">' + bikeNow + '</div><div style="font-size:11px; color:var(--muted);">Cycling</div></div>' +
-      '</div>' +
+      '</div>' + vo2Toggle +
       (fitHas(vo2S)
         ? '<div onclick="openVo2Projection()" style="cursor:pointer; border:1px solid var(--line); border-radius:8px; padding:8px 6px 2px;" onmouseover="this.style.borderColor=\'var(--z2)\'" onmouseout="this.style.borderColor=\'var(--line)\'">' +
             detailedChart(vo2S, "var(--z2)", "", "VO2 (run)") +
-            '<div style="text-align:center; font-size:10.5px; color:var(--z2); padding:4px 0 6px;">Tap for next week’s projection &rsaquo;</div></div>' +
+            '<div style="text-align:center; font-size:10.5px; color:var(--z2); padding:4px 0 6px;">' + (vo2Res === "daily" ? "One point per day Garmin logged a value." : "One point per week.") + ' Tap for the projection &rsaquo;</div></div>' +
           '<div style="display:flex; justify-content:space-between; margin-top:10px; font-size:12.5px;"><span style="color:var(--muted);">Projected next week</span>' +
             '<span><strong>' + (proj.next_week != null ? proj.next_week : "—") + '</strong> <span style="color:' + (proj.delta > 0 ? "var(--z2)" : proj.delta < 0 ? "var(--z5)" : "var(--muted-2)") + ';">(' + fmtDelta(proj.delta) + ')</span></span></div>'
-        : '<p style="font-size:11.5px; color:var(--muted-2); margin:4px 0 0;">The values above are your current live VO2 max. Garmin only stamps a new weekly VO2 max every few days, so the trend chart needs a bit more history.</p>') +
+        : '<p style="font-size:11.5px; color:var(--muted-2); margin:4px 0 0;">The values above are your current live VO2 max. Garmin only stamps a new one every 1–3 days, so the trend chart needs a bit more history.</p>') +
     '</div>';
 
     // ---- biological / fitness age ----
@@ -3018,9 +3079,13 @@
     }
     var arrow = proj.delta > 0 ? "&#9650;" : proj.delta < 0 ? "&#9660;" : "&#8594;";
     var col = proj.delta > 0 ? "var(--z2)" : proj.delta < 0 ? "var(--z5)" : "var(--muted-2)";
-    var recent = (data.vo2_series || []).filter(function(p){ return typeof p.running === "number"; }).slice(-6);
+    var srcArr = (vo2Res === "daily" && (data.vo2_daily || []).some(function(p){ return typeof p.running === "number"; }))
+      ? data.vo2_daily : data.vo2_series;
+    var recent = (srcArr || []).filter(function(p){ return typeof p.running === "number"; }).slice(vo2Res === "daily" ? -14 : -6);
     var recentRows = recent.map(function(p){
-      return '<div class="modal-breakdown-row"><span class="k">' + p.week_start + '</span><span class="v">' + p.running + '</span></div>';
+      // p.date is the day Garmin actually stamped the reading; week_start is
+      // just that week's Monday and reads as stale.
+      return '<div class="modal-breakdown-row"><span class="k">' + (p.date || p.week_start) + '</span><span class="v">' + p.running + '</span></div>';
     }).join("");
     card.innerHTML =
       '<button class="modal-close" onclick="closeOptionModal()">&times;</button>' +
@@ -3032,7 +3097,7 @@
       '</div>' +
       '<div class="modal-breakdown-row"><span class="k">Confidence</span><span class="v">' + (proj.confidence || "—") + '</span></div>' +
       '<p class="modal-explanation" style="margin:12px 0 14px;">' + (proj.rationale || "") + '</p>' +
-      '<div class="modal-breakdown-title">Recent weekly readings (running)</div>' + recentRows +
+      '<div class="modal-breakdown-title">Recent readings (running, ' + (vo2Res === "daily" ? "per day" : "one per week") + ')</div>' + recentRows +
       '<p class="modal-explanation" style="margin-top:14px; font-size:11.5px; color:var(--muted-2);">This is a trend-based estimate. When the adaptive planner recalculates your week it refines this using your training load, recovery, and how past blocks went.</p>';
     document.getElementById("option-modal").classList.add("open");
   }
@@ -3578,24 +3643,24 @@
   // still reachable and switch into live mode before the first render —
   // this way a returning visit shows live data immediately, not the
   // offline snapshot for a moment first.
+  // The backend serves this page, so the API is same-origin by default and is
+  // always worth trying. A cold free-tier instance can take ~30s to answer the
+  // first request; each loader falls back to the baked-in snapshot on failure,
+  // so the UI is usable immediately either way.
   function initData() {
-    if (settings.apiBase) {
-      var statusEl = document.getElementById("api-base-status");
-      fetch(settings.apiBase + "/api/health")
-        .then(function(r){ if(!r.ok) throw new Error("bad status"); liveMode = true;
-          if (statusEl) { statusEl.textContent = "Connected — live data active."; statusEl.style.color = "var(--z2)"; }
-        })
-        .catch(function(){ liveMode = false;
-          if (statusEl) { statusEl.textContent = "Couldn't reach your saved backend URL — using the offline snapshot for now."; statusEl.style.color = "var(--z4)"; }
-        })
-        .finally(function() {
-          loadOverview(); loadTraining(); renderRaceCoach(); if (liveMode) loadMorningReport();
-          if (document.getElementById("panel-fitness").classList.contains("active")) loadFitness();
-          if (document.getElementById("panel-sleep").classList.contains("active")) loadSleep();
-        });
-    } else {
-      loadOverview(); loadTraining(); renderRaceCoach();
-    }
+    var statusEl = document.getElementById("api-base-status");
+    fetch(settings.apiBase + "/api/health")
+      .then(function(r){ if(!r.ok) throw new Error("bad status");
+        if (statusEl) { statusEl.textContent = "Connected — live data active."; statusEl.style.color = "var(--z2)"; }
+      })
+      .catch(function(){
+        if (statusEl) { statusEl.textContent = "Backend didn't answer yet (it may be waking up) — showing the offline snapshot. Hit Refresh shortly."; statusEl.style.color = "var(--z4)"; }
+      })
+      .finally(function() {
+        loadOverview(); loadTraining(); renderRaceCoach(); loadMorningReport();
+        if (document.getElementById("panel-fitness").classList.contains("active")) loadFitness();
+        if (document.getElementById("panel-sleep").classList.contains("active")) loadSleep();
+      });
   }
   initData();
   renderJournalTagPicker();

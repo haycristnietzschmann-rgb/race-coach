@@ -87,23 +87,46 @@ def project_vo2(series: list[dict], role: str, key: str = "running") -> dict:
         return {"current": None, "next_week": None, "delta": None,
                 "confidence": "none", "rationale": "No recent VO2 max readings available."}
     current = round(float(vals[-1]), 1)
+
+    # VO2 max often jumps when Garmin's estimate catches up after a training
+    # ramp, then plateaus. A plain 6-point slope keeps projecting that early
+    # spike forward. Weight the RECENT weeks: blend the last-3 slope (what the
+    # trend is doing now) with the last-6 slope (longer context), 70/30.
     recent = vals[-6:]
-    raw_slope = _slope_per_week(recent)
-    delta = raw_slope * 0.6                       # damp the trend
+    slope_long = _slope_per_week(recent)
+    slope_short = _slope_per_week(vals[-3:]) if len(vals) >= 3 else slope_long
+    eff_slope = 0.7 * slope_short + 0.3 * slope_long
+
+    delta = eff_slope * 0.6                       # damp
     delta += {"build": 0.05, "build+": 0.05, "peak": 0.05, "deload": -0.05}.get(role, 0.0)
     delta = max(-0.3, min(0.4, delta))           # realistic weekly bound
     nxt = round(current + delta, 1)
-    conf = "low" if len(recent) < 3 else ("medium" if len(recent) < 5 else "high")
-    direction = "improving" if delta > 0.05 else ("easing back" if delta < -0.05 else "holding steady")
+
+    # Confidence drops when the short and long trends disagree (a decelerating
+    # or noisy series) — high confidence should mean a steady trend, not just
+    # "we have six numbers".
+    disagree = abs(slope_short - slope_long)
+    if len(recent) < 3:
+        conf = "low"
+    elif disagree > 0.6:
+        conf = "low"
+    elif disagree > 0.25 or len(recent) < 5:
+        conf = "medium"
+    else:
+        conf = "high"
+
+    direction = "still climbing" if eff_slope > 0.15 else (
+        "flattening out" if eff_slope > 0.02 else
+        "holding steady" if eff_slope > -0.05 else "easing back")
     return {
         "current": current,
         "next_week": nxt,
         "delta": round(delta, 1),
         "confidence": conf,
         "rationale": (
-            f"Recent weekly VO2 max is {direction} (trend ~{raw_slope:+.2f}/wk over "
-            f"{len(recent)} weeks). On a {role} week the modelled change is "
-            f"{delta:+.1f}, so next week is projected around {nxt}."
+            f"Recent VO2 max is {direction}: last 3 weeks ~{slope_short:+.2f}/wk, "
+            f"last {len(recent)} weeks ~{slope_long:+.2f}/wk. Weighting the recent "
+            f"trend, next week projects {delta:+.1f} to about {nxt}."
         ),
     }
 
@@ -776,6 +799,7 @@ def build_fitness(garmin) -> dict:
     return {
         "block": safe(lambda: block_meta(dt.date.today().isoformat()), {}),
         "vo2_series": vo2_series,
+        "vo2_daily": safe(lambda: garmin.vo2max_daily(days=30), []),
         "vo2_current": vo2_current,
         "vo2_projection": project_vo2(vo2_series, role),
         "estimate_pr_5k": estimate_pr_5k(prs, activities, vo2_series, pace_series, endurance_series, role),

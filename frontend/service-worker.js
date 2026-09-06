@@ -1,4 +1,4 @@
-const CACHE = "training-coach-v3";
+const CACHE = "training-coach-v4";
 const SHELL = ["/", "/index.html", "/manifest.json"];
 
 self.addEventListener("install", (event) => {
@@ -33,15 +33,17 @@ self.addEventListener("notificationclick", (event) => {
   event.waitUntil(clients.openWindow("/"));
 });
 
-// Network-first for API calls (data should be live) AND for the app shell, so a
-// new deploy shows up on the next reload instead of being pinned to a stale
-// cached copy. Cache is only a fallback for when the network is unavailable.
+// API: network-first (data must be live), with the read-only plan/fitness/sleep
+// GETs cached so the last-good version survives offline.
+//
+// App shell: stale-while-revalidate. The same free-tier backend now serves this
+// page, and a cold instance can take ~30s to answer — network-first there would
+// mean staring at a blank screen. So: serve the cached shell instantly, refresh
+// the cache in the background, and the new version lands on the next open.
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
 
   if (url.pathname.startsWith("/api/")) {
-    // Network-first. For the read-only plan/fitness/sleep GETs, keep a copy so
-    // the last-good version is viewable offline.
     const cacheable =
       event.request.method === "GET" &&
       /\/api\/(plan\/week|fitness|sleep)(\?|$)/.test(url.pathname + url.search);
@@ -59,20 +61,22 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
+  if (event.request.method !== "GET" || url.origin !== self.location.origin) {
+    return; // let the browser handle it normally
+  }
+
   event.respondWith(
-    fetch(event.request)
-      .then((res) => {
-        if (
-          event.request.method === "GET" &&
-          res &&
-          res.status === 200 &&
-          url.origin === self.location.origin
-        ) {
-          const copy = res.clone();
-          caches.open(CACHE).then((cache) => cache.put(event.request, copy));
-        }
-        return res;
-      })
-      .catch(() => caches.match(event.request))
+    caches.match(event.request).then((cached) => {
+      const fresh = fetch(event.request)
+        .then((res) => {
+          if (res && res.status === 200) {
+            const copy = res.clone();
+            caches.open(CACHE).then((cache) => cache.put(event.request, copy));
+          }
+          return res;
+        })
+        .catch(() => cached);          // offline / backend asleep -> keep the cached copy
+      return cached || fresh;          // instant if cached, else wait for network
+    })
   );
 });

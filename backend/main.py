@@ -8,6 +8,7 @@ from functools import lru_cache
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
@@ -567,3 +568,17 @@ def garmin_scheduled(week_start: str = None):
     monday = _plan_monday(week_start)
     plan = _plan_state["weeks"].get(monday) or {}
     return reconcile_week(monday, plan)
+
+
+# ---- Serve the frontend from this same service ----
+# Single-service deploy: no separate static host, so the app and its API share
+# one origin (no CORS, no "paste your backend URL" step). Mounted LAST so every
+# /api/* route declared above still wins — StaticFiles only sees what's left.
+# Path is derived from this file, not the working directory, so it resolves
+# whether the process starts from the repo root or from backend/.
+_FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+if _FRONTEND_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=str(_FRONTEND_DIR), html=True), name="frontend")
+    print(f"Serving frontend from {_FRONTEND_DIR}")
+else:
+    print(f"No frontend directory at {_FRONTEND_DIR} — API only.")

@@ -128,44 +128,34 @@ cache from before). Click through every tab, schedule a workout, toggle a
 sport off, add a journal entry - confirm it all works and persists after
 a refresh.
 
-## Step 3 - Deploy the frontend
+## Step 3 - Deploy (one service)
 
-Since `index.html` is fully self-contained (no build step, no bundler),
-any static host works. Pick one:
+The backend serves the frontend, so it's a single deploy - one URL, no
+separate static host, no CORS.
 
-**Netlify (easiest)**
-1. Go to app.netlify.com/drop
-2. Drag the `frontend/` folder onto the page
-3. You'll get a live URL like `https://random-name.netlify.app` instantly
-
-**GitHub Pages**
-1. Push this repo to GitHub
-2. Repo Settings -> Pages -> set source to the `frontend/` folder
-3. Your site publishes at `https://yourusername.github.io/race-coach`
-
-**Render Static Site**
-1. Push to GitHub, then in Render: New -> Static Site -> point at the repo,
-   root directory `frontend`, no build command needed
-
-## Step 4 - Deploy the backend (optional, for live data + push later)
-
-1. Push to GitHub if you haven't
-2. Render -> New -> Web Service -> root directory `backend`
+1. Push to GitHub
+2. Render -> New -> Web Service -> **root directory `backend`**
 3. Build command: `pip install -r requirements.txt`
 4. Start command: `uvicorn main:app --host 0.0.0.0 --port $PORT`
-5. Add your `.env` variables in Render's dashboard (Garmin email/password,
-   Anthropic API key, race details)
-6. You'll get a backend URL like `https://race-coach-api.onrender.com`
+5. Add env vars in Render's dashboard: `GARMIN_EMAIL`, `GARMIN_PASSWORD`,
+   `GARMIN_TOKENS_B64` (see the Garmin login section below), `ANTHROPIC_API_KEY`,
+   and `TRAINING_GOAL`
+6. You get one URL like `https://training-coach.onrender.com` - that's the
+   whole app. `main.py` mounts `../frontend` at `/`; every `/api/*` route is
+   declared before the mount so it still wins.
 
-Once deployed, tighten CORS in `main.py` - change `allow_origins=["*"]` to
-your actual frontend URL from Step 3.
+`main.py` still has `allow_origins=["*"]` in the CORS middleware - harmless
+now that the app is same-origin, but you can remove that middleware entirely
+if you never run the frontend separately.
 
-## Step 5 - Install it as an app
+## Step 4 - Install it as an app
 
-- **iPhone:** open your deployed frontend URL in Safari -> Share -> "Add to
-  Home Screen"
+- **iPhone:** open the deployed URL in Safari -> Share -> "Add to Home Screen"
 - **Mac:** open it in Safari or Chrome -> "Add to Dock" / install icon in
   the address bar
+
+Data (schedule, journal, RPE, settings) lives in that browser under that URL.
+Settings -> Export/Import moves it between browsers or URLs.
 
 It now behaves like a real app - own icon, launches full-screen.
 
