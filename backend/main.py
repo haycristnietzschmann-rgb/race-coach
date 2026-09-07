@@ -766,7 +766,7 @@ def nutrition_connect():
 @app.post("/api/nutrition/sync")
 def nutrition_sync(week_start: str = None):
     """Pull each day's logged intake from FatSecret into local state."""
-    creds = _nutrition_state.get("fatsecret") or {}
+    creds = _fatsecret_creds()
     if not creds.get("token"):
         return {"error": "Not connected — POST /api/nutrition/connect first."}
 
@@ -795,6 +795,23 @@ def nutrition_foods(q: str, limit: int = 20):
         return {"error": str(e)}
 
 
+def _fatsecret_creds() -> dict:
+    """
+    The linked account's access token, environment first.
+
+    nutrition_state.json is gitignored — correctly, it holds a credential —
+    which means a link made locally does not survive a deploy. Reading the
+    environment first lets the same token be handed to Render as config,
+    so the link is made once rather than re-run through the PIN flow on
+    every host.
+    """
+    token = os.environ.get("FATSECRET_ACCESS_TOKEN")
+    secret = os.environ.get("FATSECRET_ACCESS_SECRET")
+    if token and secret:
+        return {"token": token, "secret": secret}
+    return _nutrition_state.get("fatsecret") or {}
+
+
 @app.get("/api/nutrition/prep/pantry")
 def nutrition_pantry():
     """
@@ -803,7 +820,7 @@ def nutrition_pantry():
     Saved foods rather than the whole database: these are the things actually
     cooked with, already carrying the right brand and preparation.
     """
-    creds = _nutrition_state.get("fatsecret") or {}
+    creds = _fatsecret_creds()
     if not creds.get("token"):
         return {"error": "Not linked — run /api/nutrition/link/start first."}
     try:
