@@ -634,15 +634,37 @@ def _plan_for(monday: str) -> dict:
     return plan
 
 
+def _nutrition_mode() -> tuple:
+    """
+    (mode, prescribed_deficit) — environment first, then local state.
+
+    Same reason as _fatsecret_creds: nutrition_state.json is gitignored, so a
+    deficit configured locally silently reverts to plain fuelling on the
+    deployed host. A target that quietly differs between two copies of the
+    same app is worse than one that is wrong in an obvious way.
+    """
+    mode = os.environ.get("NUTRITION_MODE") or _nutrition_state["mode"]
+    raw = os.environ.get("NUTRITION_DEFICIT_KCAL")
+    if raw:
+        try:
+            deficit = int(raw)
+        except ValueError:
+            print(f"NUTRITION_DEFICIT_KCAL is not a number: {raw!r} — ignoring")
+            deficit = _nutrition_state["prescribed_deficit_kcal"]
+    else:
+        deficit = _nutrition_state["prescribed_deficit_kcal"]
+    return mode, deficit
+
+
 def _week_targets_now(week_start: str = None) -> dict:
     """This week's targets, or an {"error"} dict the routes can return as-is."""
     profile = _athlete_profile()
     if not profile.get("age"):
         return {"error": "No birth date on the Garmin profile."}
+    mode, deficit = _nutrition_mode()
     return week_targets(
         _plan_for(_plan_monday(week_start)), profile,
-        mode=_nutrition_state["mode"],
-        prescribed_deficit_kcal=_nutrition_state["prescribed_deficit_kcal"],
+        mode=mode, prescribed_deficit_kcal=deficit,
     )
 
 
@@ -655,9 +677,9 @@ def nutrition_week(week_start: str = None, mode: str = None, deficit: int = None
         return {"error": "No birth date on the Garmin profile."}
     return week_targets(
         _plan_for(monday), profile,
-        mode=mode or _nutrition_state["mode"],
+        mode=mode or _nutrition_mode()[0],
         prescribed_deficit_kcal=(deficit if deficit is not None
-                                 else _nutrition_state["prescribed_deficit_kcal"]),
+                                 else _nutrition_mode()[1]),
     )
 
 
@@ -691,10 +713,10 @@ def nutrition_adherence(week_start: str = None):
     diet = {"logged_days": 0, "unlogged_days": 7, "rate": None,
             "note": "No intake source connected yet."}
     if profile.get("age"):
+        cfg_mode, cfg_deficit = _nutrition_mode()
         targets = week_targets(
             plan, profile,
-            mode=_nutrition_state["mode"],
-            prescribed_deficit_kcal=_nutrition_state["prescribed_deficit_kcal"],
+            mode=cfg_mode, prescribed_deficit_kcal=cfg_deficit,
         )
         diet = diet_adherence(targets["days"], _nutrition_state["intake"])
 
