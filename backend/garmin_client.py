@@ -67,6 +67,21 @@ class GarminClient:
             else:
                 raise
 
+    def get_user_profile(self) -> dict:
+        """
+        Weight / height / birth date / gender from the Garmin profile.
+
+        garminconnect 0.2.8 (pinned to dodge the Cloudflare login block) has no
+        profile method, so this goes through garth's authenticated session
+        directly. Returns {} on failure, like the other wrappers here.
+        """
+        try:
+            return self.api.garth.connectapi(
+                "/userprofile-service/userprofile/user-settings") or {}
+        except Exception as e:
+            print(f"get_user_profile failed: {e}")
+            return {}
+
     def today(self) -> str:
         return dt.date.today().isoformat()
 

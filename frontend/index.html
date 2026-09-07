@@ -384,6 +384,7 @@
       <button class="nav-item" data-tab="training"><span class="label"><span class="nav-dot"></span>Training</span></button>
       <button class="nav-item" data-tab="race"><span class="label"><span class="nav-dot"></span>Training Coach</span></button>
       <button class="nav-item" data-tab="fitness"><span class="label"><span class="nav-dot"></span>Fitness</span></button>
+      <button class="nav-item" data-tab="nutrition"><span class="label"><span class="nav-dot"></span>Nutrition</span></button>
       <button class="nav-item" data-tab="sleep"><span class="label"><span class="nav-dot"></span>Sleep</span></button>
       <button class="nav-item" data-tab="ask"><span class="label"><span class="nav-dot"></span>Ask Coach</span></button>
       <button class="nav-item" data-tab="journal"><span class="label"><span class="nav-dot"></span>Journal</span></button>
@@ -429,6 +430,11 @@
     <section class="tab-panel" id="panel-fitness">
       <div class="page-header"><div class="page-title">Fitness</div></div>
       <div id="fitness-content"><div class="status">Loading fitness data&hellip;</div></div>
+    </section>
+
+    <section class="tab-panel" id="panel-nutrition">
+      <div class="page-header"><div class="page-title">Nutrition</div></div>
+      <div id="nutrition-content"><div class="status">Loading nutrition targets&hellip;</div></div>
     </section>
 
     <section class="tab-panel" id="panel-sleep">
@@ -878,6 +884,7 @@
       document.getElementById("panel-" + btn.dataset.tab).classList.add("active");
       if (btn.dataset.tab === "fitness") loadFitness();
       if (btn.dataset.tab === "sleep") loadSleep();
+      if (btn.dataset.tab === "nutrition") loadNutrition();
     });
   });
 
@@ -3137,6 +3144,99 @@
   // SLEEP TAB — custom score, debt, adaptive need + recommended times
   // ============================================================
   var lastSleep = null;
+  // ---------------- Nutrition ----------------
+  // Two questions on one tab: did you do the work, and did you fuel it.
+  // Targets come from the same plan the Training Coach uses, so the numbers
+  // exist before the week does — which is the point, since meal prep happens
+  // on Sunday for a week that hasn't been trained yet.
+  function loadNutrition() {
+    var el = document.getElementById("nutrition-content");
+    if (!el) return;
+    if (!liveMode) {
+      el.innerHTML = '<div class="card"><div class="card-title">Nutrition</div>' +
+        '<p style="font-size:12.5px; color:var(--muted); line-height:1.55;">' +
+        'Targets are computed from your live plan and Garmin profile. Connect the backend in Settings to see them.</p></div>';
+      return;
+    }
+    el.innerHTML = '<div class="status">Loading nutrition targets&hellip;</div>';
+    Promise.all([
+      fetch(settings.apiBase + "/api/nutrition/week").then(function(r){ return r.ok ? r.json() : null; }),
+      fetch(settings.apiBase + "/api/nutrition/adherence").then(function(r){ return r.ok ? r.json() : null; })
+    ]).then(function(res){
+      el.innerHTML = renderNutrition(res[0], res[1]);
+    }).catch(function(){
+      el.innerHTML = '<div class="card"><div class="card-title">Nutrition</div>' +
+        '<p style="font-size:12.5px; color:var(--muted);">Couldn\'t reach the backend.</p></div>';
+    });
+  }
+
+  function pctText(rate) { return (rate === null || rate === undefined) ? "—" : Math.round(rate * 100) + "%"; }
+
+  function renderNutrition(week, adh) {
+    var html = "";
+
+    // --- Completion rates, side by side ---
+    if (adh) {
+      var t = adh.training || {};
+      var d = adh.diet || {};
+      var cardio = t.rate, lift = t.lift_rate, diet = d.rate;
+      html += '<div class="card"><div class="card-title">Completion rate &middot; this week</div>' +
+        '<div style="display:flex; flex-wrap:wrap; gap:26px; align-items:center; margin-top:6px;">' +
+        nutRing(cardio, "var(--z2)", "Sessions", (t.completed || 0) + " of " + (t.planned || 0)) +
+        nutRing(lift, "var(--z4)", "Lifts", (t.lifts_completed || 0) + " of " + (t.lifts_planned || 0)) +
+        nutRing(diet, "var(--z1)", "Fuelling", d.logged_days ? (d.logged_days + " days logged") : "no intake yet") +
+        '</div>';
+      if (t.missed_titles && t.missed_titles.length) {
+        html += '<div style="margin-top:12px; font-size:12px; color:var(--muted);">Missed: ' +
+          t.missed_titles.join(", ") + '</div>';
+      }
+      if (!d.logged_days) {
+        html += '<div style="margin-top:8px; font-size:12px; color:var(--muted-2);">' +
+          'Fuelling stays empty until a food tracker is connected.</div>';
+      } else if (d.mean_error_pct !== null && d.mean_error_pct !== undefined) {
+        html += '<div style="margin-top:8px; font-size:12px; color:var(--muted);">Average ' +
+          (d.mean_error_pct >= 0 ? "over" : "under") + ' target by ' + Math.abs(d.mean_error_pct) +
+          '% &middot; protein hit ' + pctText(d.protein_rate) + ' of logged days</div>';
+      }
+      html += '</div>';
+    }
+
+    // --- Daily targets ---
+    if (week && week.days) {
+      var max = Math.max.apply(null, week.days.map(function(x){ return x.target_kcal; }));
+      html += '<div class="card"><div class="card-title">Daily targets &middot; ' +
+        (week.mode === "deficit" ? "deficit" : week.mode) + '</div>' +
+        '<div style="font-size:12px; color:var(--muted); margin-bottom:10px;">' +
+        'Week total ' + week.week_kcal.toLocaleString() + ' kcal &middot; biggest day ' + week.hardest_day + '</div>';
+
+      week.days.forEach(function(x){
+        var w = Math.round((x.target_kcal / max) * 100);
+        html += '<div style="margin-bottom:10px;">' +
+          '<div style="display:flex; justify-content:space-between; font-size:12.5px; margin-bottom:3px;">' +
+          '<span>' + x.day + (x.has_lift ? ' <span style="color:var(--z4);">&#9679;</span>' : '') + '</span>' +
+          '<span style="font-family:\'IBM Plex Mono\', monospace;">' + x.target_kcal.toLocaleString() + ' kcal</span></div>' +
+          '<div style="height:6px; background:var(--surface-2); border-radius:3px; overflow:hidden;">' +
+          '<div style="height:100%; width:' + w + '%; background:var(--z2);"></div></div>' +
+          '<div style="font-size:11px; color:var(--muted-2); margin-top:3px; font-family:\'IBM Plex Mono\', monospace;">' +
+          'C ' + x.carbs_g + 'g &middot; P ' + x.protein_g + 'g &middot; F ' + x.fat_g + 'g' +
+          (x.deficit_applied ? ' &middot; cut ' + x.deficit_applied : '') + '</div></div>';
+      });
+      html += '<div style="font-size:11px; color:var(--muted-2); margin-top:4px;">' +
+        '<span style="color:var(--z4);">&#9679;</span> lift day &mdash; protein raised</div></div>';
+    }
+
+    return html || '<div class="status">No nutrition data.</div>';
+  }
+
+  function nutRing(rate, color, label, sub) {
+    var pct = (rate === null || rate === undefined) ? 0 : rate * 100;
+    return '<div style="display:flex; align-items:center; gap:12px;">' +
+      ring(pct, 100, color, 70) +
+      '<div><div style="font-family:\'Bebas Neue\',sans-serif; font-size:26px; line-height:1;">' + pctText(rate) + '</div>' +
+      '<div style="font-size:12px; color:var(--muted);">' + label + '</div>' +
+      '<div style="font-size:11px; color:var(--muted-2);">' + sub + '</div></div></div>';
+  }
+
   function loadSleep() {
     var el = document.getElementById("sleep-content");
     if (!el) return;

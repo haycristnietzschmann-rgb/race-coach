@@ -22,6 +22,9 @@ from planner import (
     assemble_context, generate_week_plan, adjust_week,
     block_meta, project_vo2, build_fitness, build_sleep,
 )
+from nutrition import (
+    week_targets, deficit_for_goal, training_adherence, diet_adherence,
+)
 from garmin_writer import push_workout, push_week as gc_push_week, reconcile_week
 
 # Training goal fed to the Claude coaching prompts (morning brief + Ask Coach).
@@ -568,6 +571,109 @@ def garmin_scheduled(week_start: str = None):
     monday = _plan_monday(week_start)
     plan = _plan_state["weeks"].get(monday) or {}
     return reconcile_week(monday, plan)
+
+
+# ---- Nutrition: macro estimator / planner ----
+# Forecast, not a diary. The planner already knows the week's work, so this
+# turns it into a per-day energy + macro target you can portion meal prep to.
+# Intake logging lives in a real tracker; this side only produces the numbers.
+
+_NUTRITION_FILE = Path(__file__).parent / "nutrition_state.json"
+
+
+def _load_nutrition_state() -> dict:
+    if _NUTRITION_FILE.exists():
+        try:
+            return json.loads(_NUTRITION_FILE.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+_nutrition_state = _load_nutrition_state()
+_nutrition_state.setdefault("mode", "fuel")
+_nutrition_state.setdefault("prescribed_deficit_kcal", 0)
+_nutrition_state.setdefault("intake", {})       # iso date -> {kcal, protein_g, ...}
+
+
+def _athlete_profile() -> dict:
+    """Weight / height / age / sex straight off the Garmin profile."""
+    ud = (get_client().get_user_profile() or {}).get("userData") or {}
+    age = None
+    if ud.get("birthDate"):
+        b = dt.date.fromisoformat(ud["birthDate"])
+        today = dt.date.today()
+        age = today.year - b.year - ((today.month, today.day) < (b.month, b.day))
+    return {
+        "weight_kg": (ud.get("weight") or 0) / 1000.0 or None,
+        "height_cm": ud.get("height"),
+        "age": age,
+        "sex": ud.get("gender", "MALE"),
+    }
+
+
+def _plan_for(monday: str) -> dict:
+    plan = _plan_state["weeks"].get(monday)
+    if not plan:
+        plan = generate_week_plan(assemble_context(get_client(), _plan_state, monday))
+        _plan_state["weeks"][monday] = plan
+        _save_plan_state(_plan_state)
+    return plan
+
+
+@app.get("/api/nutrition/week")
+def nutrition_week(week_start: str = None, mode: str = None, deficit: int = None):
+    """Per-day kcal + macro targets for a planned week."""
+    monday = _plan_monday(week_start)
+    profile = _athlete_profile()
+    if not profile.get("age"):
+        return {"error": "No birth date on the Garmin profile."}
+    return week_targets(
+        _plan_for(monday), profile,
+        mode=mode or _nutrition_state["mode"],
+        prescribed_deficit_kcal=(deficit if deficit is not None
+                                 else _nutrition_state["prescribed_deficit_kcal"]),
+    )
+
+
+@app.get("/api/nutrition/goal")
+def nutrition_goal(current_kg: float, target_kg: float, weeks: float):
+    """The daily deficit a weight goal actually requires."""
+    return deficit_for_goal(current_kg, target_kg, weeks)
+
+
+@app.get("/api/nutrition/adherence")
+def nutrition_adherence(week_start: str = None):
+    """Did you do the work, and did you fuel it — for one week."""
+    monday = _plan_monday(week_start)
+    plan = _plan_for(monday)
+    sunday = (dt.date.fromisoformat(monday) + dt.timedelta(days=6)).isoformat()
+
+    try:
+        activities = get_client().activities_in_range(monday, sunday)
+    except Exception as e:
+        activities = []
+        print(f"adherence: activity fetch failed: {e}")
+
+    # For the current week, score only the days that have already happened.
+    today = dt.date.today()
+    monday_date = dt.date.fromisoformat(monday)
+    through = (today - monday_date).days
+    through = through if 0 <= through <= 6 else None
+    training = training_adherence(plan, activities, through_day=through)
+
+    profile = _athlete_profile()
+    diet = {"logged_days": 0, "unlogged_days": 7, "rate": None,
+            "note": "No intake source connected yet."}
+    if profile.get("age"):
+        targets = week_targets(
+            plan, profile,
+            mode=_nutrition_state["mode"],
+            prescribed_deficit_kcal=_nutrition_state["prescribed_deficit_kcal"],
+        )
+        diet = diet_adherence(targets["days"], _nutrition_state["intake"])
+
+    return {"week_start": monday, "training": training, "diet": diet}
 
 
 # ---- Serve the frontend from this same service ----
