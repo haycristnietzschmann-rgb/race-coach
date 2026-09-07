@@ -28,11 +28,14 @@ import base64
 import hashlib
 import secrets
 import datetime as dt
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, parse_qsl
 
 import requests
 
 BASE_URL = "https://platform.fatsecret.com/rest/server.api"
+REQUEST_TOKEN_URL = "https://authentication.fatsecret.com/oauth/request_token"
+AUTHORIZE_URL = "https://authentication.fatsecret.com/oauth/authorize"
+ACCESS_TOKEN_URL = "https://authentication.fatsecret.com/oauth/access_token"
 EPOCH = dt.date(1970, 1, 1)
 
 
@@ -170,3 +173,81 @@ def day_totals(token: str, secret: str, date) -> dict:
         total["carbs_g"] += float(e.get("carbohydrate") or 0)
         total["fat_g"] += float(e.get("fat") or 0)
     return {k: round(v, 1) for k, v in total.items()}
+
+
+# ---- Three-legged OAuth: link the athlete's own fatsecret.com account ----
+#
+# profile.create mints a profile inside this app's namespace, which the
+# Calorie Counter phone app cannot sign into. To score fuelling against a
+# diary the athlete actually keeps on their phone, the backend has to be
+# authorised against their real account instead — which is this flow.
+#
+# Verification is out-of-band by default: FatSecret shows a PIN in the browser
+# and the athlete pastes it back. That avoids registering a callback URL and
+# behaves the same on localhost as on Render.
+
+
+def _oauth_get(url: str, params: dict, token_secret: str = "") -> dict:
+    """Signed GET against an endpoint that answers form-encoded, not JSON."""
+    key = os.environ.get("FATSECRET_KEY")
+    secret = os.environ.get("FATSECRET_SECRET")
+    if not key or not secret:
+        raise FatSecretError("FATSECRET_KEY / FATSECRET_SECRET are not set.")
+
+    full = {
+        "oauth_consumer_key": key,
+        "oauth_nonce": secrets.token_hex(16),
+        "oauth_signature_method": "HMAC-SHA1",
+        "oauth_timestamp": str(int(time.time())),
+        "oauth_version": "1.0",
+        **params,
+    }
+    full["oauth_signature"] = _sign("GET", url, full, secret, token_secret)
+
+    try:
+        r = requests.get(url, params=full, timeout=20)
+        r.raise_for_status()
+    except requests.RequestException as e:
+        body = getattr(e.response, "text", "")[:200] if getattr(e, "response", None) else ""
+        raise FatSecretError(f"FatSecret OAuth call failed: {e} {body}") from e
+
+    parsed = dict(parse_qsl(r.text))
+    if not parsed:
+        raise FatSecretError(f"Unexpected OAuth response: {r.text[:200]}")
+    return parsed
+
+
+def start_link(callback: str = "oob") -> dict:
+    """
+    Step 1. Returns a temporary token plus the URL to approve it at.
+
+    The temporary secret must survive until the verifier comes back, so the
+    caller has to store it — it is half of the signing key for step 2.
+    """
+    d = _oauth_get(REQUEST_TOKEN_URL, {"oauth_callback": callback})
+    token = d.get("oauth_token")
+    if not token:
+        raise FatSecretError(f"No request token returned: {d}")
+    return {
+        "request_token": token,
+        "request_secret": d.get("oauth_token_secret", ""),
+        "authorize_url": f"{AUTHORIZE_URL}?oauth_token={_quote(token)}",
+    }
+
+
+def finish_link(request_token: str, request_secret: str, verifier: str) -> dict:
+    """
+    Step 2. Trades the approved temporary token for a lasting access token.
+
+    The returned pair is what every later diary call is signed with, and
+    FatSecret will not show it again — store it before returning.
+    """
+    d = _oauth_get(
+        ACCESS_TOKEN_URL,
+        {"oauth_token": request_token, "oauth_verifier": verifier.strip()},
+        token_secret=request_secret,
+    )
+    token = d.get("oauth_token")
+    if not token:
+        raise FatSecretError(f"No access token returned: {d}")
+    return {"token": token, "secret": d.get("oauth_token_secret", "")}

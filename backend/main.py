@@ -27,6 +27,7 @@ from nutrition import (
 )
 from fatsecret import (
     FatSecretError, create_profile, day_totals, search_foods,
+    start_link, finish_link,
 )
 from garmin_writer import push_workout, push_week as gc_push_week, reconcile_week
 
@@ -685,6 +686,47 @@ def nutrition_adherence(week_start: str = None):
         diet = diet_adherence(targets["days"], _nutrition_state["intake"])
 
     return {"week_start": monday, "training": training, "diet": diet}
+
+
+@app.post("/api/nutrition/link/start")
+def nutrition_link_start():
+    """
+    Begin linking the athlete's own fatsecret.com account.
+
+    Returns a URL to approve in a browser. The temporary secret is stashed
+    server-side because it forms half of the signing key for the exchange —
+    it is not something the caller should have to carry back.
+    """
+    try:
+        d = start_link()
+    except FatSecretError as e:
+        return {"error": str(e)}
+    _nutrition_state["fatsecret_pending"] = {
+        "request_token": d["request_token"],
+        "request_secret": d["request_secret"],
+    }
+    _save_nutrition_state(_nutrition_state)
+    return {"authorize_url": d["authorize_url"],
+            "next": "Approve in a browser, then POST the PIN to /api/nutrition/link/finish"}
+
+
+@app.post("/api/nutrition/link/finish")
+def nutrition_link_finish(body: dict):
+    """Exchange the PIN for a lasting access token. Body: {verifier}."""
+    pending = _nutrition_state.get("fatsecret_pending") or {}
+    if not pending.get("request_token"):
+        return {"error": "No link in progress — call /api/nutrition/link/start first."}
+    verifier = (body or {}).get("verifier", "")
+    if not verifier:
+        return {"error": "Missing verifier (the PIN shown after approving)."}
+    try:
+        creds = finish_link(pending["request_token"], pending["request_secret"], verifier)
+    except FatSecretError as e:
+        return {"error": str(e)}
+    _nutrition_state["fatsecret"] = creds
+    _nutrition_state.pop("fatsecret_pending", None)
+    _save_nutrition_state(_nutrition_state)
+    return {"status": "linked"}
 
 
 @app.post("/api/nutrition/connect")
