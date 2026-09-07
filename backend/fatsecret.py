@@ -204,12 +204,18 @@ def _oauth_get(url: str, params: dict, token_secret: str = "") -> dict:
     }
     full["oauth_signature"] = _sign("GET", url, full, secret, token_secret)
 
-    try:
-        r = requests.get(url, params=full, timeout=20)
-        r.raise_for_status()
-    except requests.RequestException as e:
-        body = getattr(e.response, "text", "")[:200] if getattr(e, "response", None) else ""
-        raise FatSecretError(f"FatSecret OAuth call failed: {e} {body}") from e
+    r = requests.get(url, params=full, timeout=20)
+    if r.status_code >= 400:
+        # These endpoints often answer 400 with an empty body, which says
+        # nothing on its own — so the status and any body are reported
+        # together with the most common cause, an expired request token.
+        # Request tokens are short-lived and single-use.
+        detail = r.text.strip()[:300] or "(empty body)"
+        raise FatSecretError(
+            f"FatSecret OAuth {r.status_code}: {detail} — a request token that "
+            "has expired or already been used is the usual cause; start the "
+            "link again for a fresh one."
+        )
 
     parsed = dict(parse_qsl(r.text))
     if not parsed:
@@ -251,3 +257,17 @@ def finish_link(request_token: str, request_secret: str, verifier: str) -> dict:
     if not token:
         raise FatSecretError(f"No access token returned: {d}")
     return {"token": token, "secret": d.get("oauth_token_secret", "")}
+
+
+def saved_foods(token: str, secret: str, page: int = 0) -> list:
+    """
+    The athlete's saved/favourite foods — their real pantry.
+
+    Preferred over a database search for meal prep: these already carry the
+    brand and preparation actually cooked with, so the macros match what is
+    genuinely in the pot.
+    """
+    data = call("foods.get_favorites", token=token, token_secret=secret,
+                page_number=page)
+    foods = (data.get("foods") or {}).get("food") or []
+    return foods if isinstance(foods, list) else [foods]

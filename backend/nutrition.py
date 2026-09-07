@@ -502,3 +502,146 @@ def diet_adherence(days: list, intake_by_date: dict) -> dict:
         "mean_error_pct": round(sum(s["error_pct"] for s in scored) / n, 1) if n else None,
         "days": scored,
     }
+
+
+# ---- Meal prep: one batch, portioned across the week ----
+#
+# The workflow this models is the real one: cook a single batch on Sunday,
+# put it on a scale, then divide it into containers. Crucially the split is
+# by cooked weight, not by raw ingredient weight — rice roughly triples and
+# chicken loses about a quarter, and those shifts differ every time depending
+# on heat and lid. Measuring the batch after cooking sidesteps the whole
+# problem: whatever the pot weighs is the truth, and macros per 100 g cooked
+# follow from it.
+
+WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+
+
+def batch_totals(ingredients: list) -> dict:
+    """
+    Macros for a whole batch from its raw ingredients.
+
+    ingredients: [{"name", "grams", "kcal_100g", "protein_100g",
+                   "carbs_100g", "fat_100g"}, ...]
+    """
+    total = {"kcal": 0.0, "protein_g": 0.0, "carbs_g": 0.0, "fat_g": 0.0,
+             "raw_grams": 0.0}
+    lines = []
+    for ing in ingredients:
+        g = float(ing.get("grams") or 0)
+        if g <= 0:
+            continue
+        f = g / 100.0
+        line = {
+            "name": ing.get("name"),
+            "grams": round(g, 1),
+            "kcal": round(float(ing.get("kcal_100g") or 0) * f, 1),
+            "protein_g": round(float(ing.get("protein_100g") or 0) * f, 1),
+            "carbs_g": round(float(ing.get("carbs_100g") or 0) * f, 1),
+            "fat_g": round(float(ing.get("fat_100g") or 0) * f, 1),
+        }
+        lines.append(line)
+        total["kcal"] += line["kcal"]
+        total["protein_g"] += line["protein_g"]
+        total["carbs_g"] += line["carbs_g"]
+        total["fat_g"] += line["fat_g"]
+        total["raw_grams"] += g
+
+    return {"lines": lines, **{k: round(v, 1) for k, v in total.items()}}
+
+
+def portion_batch(batch: dict, cooked_grams: float, days: list,
+                  share_of_day: float = 1.0) -> dict:
+    """
+    Split one cooked batch across days in proportion to their targets.
+
+    share_of_day is the fraction of each day's energy this batch is meant to
+    cover — a prep that is lunch only should be told so, otherwise it sizes
+    itself as though it were the entire day's food.
+
+    Portions are proportional to each day's target rather than equal, which is
+    the whole reason for doing this: an equal split underfeeds the long ride
+    and overfeeds the rest day by the same amount.
+    """
+    cooked_grams = float(cooked_grams or 0)
+    if cooked_grams <= 0:
+        return {"error": "cooked_grams must be greater than zero"}
+    if not days:
+        return {"error": "no days to portion across"}
+
+    per_100 = {
+        "kcal": round(batch["kcal"] / cooked_grams * 100, 1),
+        "protein_g": round(batch["protein_g"] / cooked_grams * 100, 1),
+        "carbs_g": round(batch["carbs_g"] / cooked_grams * 100, 1),
+        "fat_g": round(batch["fat_g"] / cooked_grams * 100, 1),
+    }
+
+    wanted = [max(0.0, d["target_kcal"] * share_of_day) for d in days]
+    demand = sum(wanted)
+    if demand <= 0:
+        return {"error": "days have no energy target"}
+
+    # The batch is whatever it is. Scale the requested shares to fit it, and
+    # report the ratio rather than quietly pretending the batch was the right
+    # size — an athlete who cooked 30% short needs to know that, not to
+    # receive confident portions that leave them hungry by Thursday.
+    coverage = min(1.0, cooked_grams * per_100["kcal"] / 100 / demand)
+
+    portions = []
+    for d, w in zip(days, wanted):
+        grams = cooked_grams * (w / demand)
+        portions.append({
+            "day": d["day"],
+            "date": d.get("date"),
+            "grams": round(grams),
+            "kcal": round(grams / 100 * per_100["kcal"]),
+            "protein_g": round(grams / 100 * per_100["protein_g"]),
+            "carbs_g": round(grams / 100 * per_100["carbs_g"]),
+            "fat_g": round(grams / 100 * per_100["fat_g"]),
+            "day_target_kcal": d["target_kcal"],
+            "covers_pct": round(grams / 100 * per_100["kcal"] / d["target_kcal"] * 100),
+        })
+
+    return {
+        "cooked_grams": round(cooked_grams),
+        "per_100g_cooked": per_100,
+        "batch": {k: batch[k] for k in ("kcal", "protein_g", "carbs_g", "fat_g")},
+        "share_of_day": share_of_day,
+        "coverage": round(coverage, 3),
+        "shortfall_kcal": round(max(0.0, demand - batch["kcal"])),
+        "portions": portions,
+    }
+
+
+def scale_batch_to_days(ingredients: list, days: list,
+                        share_of_day: float = 1.0) -> dict:
+    """
+    How much raw ingredient to buy and cook for a given set of days.
+
+    Runs the other direction from portion_batch: rather than dividing a batch
+    that already exists, it scales a recipe's proportions up until the batch
+    covers the week. Answers the question actually asked at the shop.
+    """
+    base = batch_totals(ingredients)
+    if base["kcal"] <= 0:
+        return {"error": "ingredients carry no energy — check the per-100g values"}
+
+    needed = sum(d["target_kcal"] * share_of_day for d in days)
+    factor = needed / base["kcal"]
+
+    return {
+        "scale_factor": round(factor, 3),
+        "needed_kcal": round(needed),
+        "shopping_list": [
+            {"name": l["name"], "grams": round(l["grams"] * factor)}
+            for l in base["lines"]
+        ],
+        "projected": {
+            "kcal": round(base["kcal"] * factor),
+            "protein_g": round(base["protein_g"] * factor),
+            "carbs_g": round(base["carbs_g"] * factor),
+            "fat_g": round(base["fat_g"] * factor),
+        },
+        "note": ("Weigh the batch after cooking and send that number back — "
+                 "portions are computed from cooked weight, not this estimate."),
+    }

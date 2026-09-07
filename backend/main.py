@@ -24,10 +24,11 @@ from planner import (
 )
 from nutrition import (
     week_targets, deficit_for_goal, training_adherence, diet_adherence,
+    batch_totals, portion_batch, scale_batch_to_days, WEEKDAYS,
 )
 from fatsecret import (
     FatSecretError, create_profile, day_totals, search_foods,
-    start_link, finish_link,
+    start_link, finish_link, saved_foods,
 )
 from garmin_writer import push_workout, push_week as gc_push_week, reconcile_week
 
@@ -633,6 +634,18 @@ def _plan_for(monday: str) -> dict:
     return plan
 
 
+def _week_targets_now(week_start: str = None) -> dict:
+    """This week's targets, or an {"error"} dict the routes can return as-is."""
+    profile = _athlete_profile()
+    if not profile.get("age"):
+        return {"error": "No birth date on the Garmin profile."}
+    return week_targets(
+        _plan_for(_plan_monday(week_start)), profile,
+        mode=_nutrition_state["mode"],
+        prescribed_deficit_kcal=_nutrition_state["prescribed_deficit_kcal"],
+    )
+
+
 @app.get("/api/nutrition/week")
 def nutrition_week(week_start: str = None, mode: str = None, deficit: int = None):
     """Per-day kcal + macro targets for a planned week."""
@@ -780,6 +793,57 @@ def nutrition_foods(q: str, limit: int = 20):
         return search_foods(q, max_results=limit)
     except FatSecretError as e:
         return {"error": str(e)}
+
+
+@app.get("/api/nutrition/prep/pantry")
+def nutrition_pantry():
+    """
+    The athlete's own saved foods on FatSecret, as meal-prep components.
+
+    Saved foods rather than the whole database: these are the things actually
+    cooked with, already carrying the right brand and preparation.
+    """
+    creds = _nutrition_state.get("fatsecret") or {}
+    if not creds.get("token"):
+        return {"error": "Not linked — run /api/nutrition/link/start first."}
+    try:
+        return {"foods": saved_foods(creds["token"], creds["secret"])}
+    except FatSecretError as e:
+        return {"error": str(e)}
+
+
+@app.post("/api/nutrition/prep/plan")
+def nutrition_prep_plan(body: dict):
+    """
+    How much to buy and cook. Body: {ingredients, days?, share_of_day?}.
+
+    days defaults to weekdays — the prep covers Monday to Friday, with the
+    weekend cooked fresh.
+    """
+    body = body or {}
+    week = _week_targets_now(body.get("week_start"))
+    if "error" in week:
+        return week
+    wanted = set(body.get("days") or WEEKDAYS)
+    days = [d for d in week["days"] if d["day"] in wanted]
+    return scale_batch_to_days(body.get("ingredients") or [], days,
+                               float(body.get("share_of_day", 1.0)))
+
+
+@app.post("/api/nutrition/prep/portion")
+def nutrition_prep_portion(body: dict):
+    """
+    Split the cooked batch. Body: {ingredients, cooked_grams, days?, share_of_day?}.
+    """
+    body = body or {}
+    week = _week_targets_now(body.get("week_start"))
+    if "error" in week:
+        return week
+    wanted = set(body.get("days") or WEEKDAYS)
+    days = [d for d in week["days"] if d["day"] in wanted]
+    batch = batch_totals(body.get("ingredients") or [])
+    return portion_batch(batch, body.get("cooked_grams"), days,
+                         float(body.get("share_of_day", 1.0)))
 
 
 # ---- Serve the frontend from this same service ----
