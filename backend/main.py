@@ -25,6 +25,9 @@ from planner import (
 from nutrition import (
     week_targets, deficit_for_goal, training_adherence, diet_adherence,
 )
+from fatsecret import (
+    FatSecretError, create_profile, day_totals, search_foods,
+)
 from garmin_writer import push_workout, push_week as gc_push_week, reconcile_week
 
 # Training goal fed to the Claude coaching prompts (morning brief + Ask Coach).
@@ -590,10 +593,18 @@ def _load_nutrition_state() -> dict:
     return {}
 
 
+def _save_nutrition_state(data: dict) -> None:
+    try:
+        _NUTRITION_FILE.write_text(json.dumps(data, indent=2, default=str))
+    except Exception as e:
+        print(f"nutrition state save failed: {e}")
+
+
 _nutrition_state = _load_nutrition_state()
 _nutrition_state.setdefault("mode", "fuel")
 _nutrition_state.setdefault("prescribed_deficit_kcal", 0)
-_nutrition_state.setdefault("intake", {})       # iso date -> {kcal, protein_g, ...}
+_nutrition_state.setdefault("intake", {})
+_nutrition_state.setdefault("fatsecret", {})       # iso date -> {kcal, protein_g, ...}
 
 
 def _athlete_profile() -> dict:
@@ -674,6 +685,59 @@ def nutrition_adherence(week_start: str = None):
         diet = diet_adherence(targets["days"], _nutrition_state["intake"])
 
     return {"week_start": monday, "training": training, "diet": diet}
+
+
+@app.post("/api/nutrition/connect")
+def nutrition_connect():
+    """
+    Mint the FatSecret profile this backend logs against.
+
+    Creates a durable object on FatSecret and returns a token pair that is
+    shown once, so it is stored immediately. Idempotent by refusal: if a
+    profile is already stored it is kept rather than silently replaced, which
+    would orphan every diary entry logged against the old one.
+    """
+    if _nutrition_state.get("fatsecret", {}).get("token"):
+        return {"status": "already-connected"}
+    try:
+        creds = create_profile(user_id=f"race-coach-{dt.date.today().isoformat()}")
+    except FatSecretError as e:
+        return {"error": str(e)}
+    _nutrition_state["fatsecret"] = creds
+    _save_nutrition_state(_nutrition_state)
+    return {"status": "connected"}
+
+
+@app.post("/api/nutrition/sync")
+def nutrition_sync(week_start: str = None):
+    """Pull each day's logged intake from FatSecret into local state."""
+    creds = _nutrition_state.get("fatsecret") or {}
+    if not creds.get("token"):
+        return {"error": "Not connected — POST /api/nutrition/connect first."}
+
+    monday = dt.date.fromisoformat(_plan_monday(week_start))
+    pulled, failed = 0, []
+    for i in range(7):
+        day = (monday + dt.timedelta(days=i)).isoformat()
+        try:
+            totals = day_totals(creds["token"], creds["secret"], day)
+        except FatSecretError as e:
+            failed.append({"date": day, "error": str(e)})
+            continue
+        if totals["kcal"]:
+            _nutrition_state["intake"][day] = totals
+            pulled += 1
+    _save_nutrition_state(_nutrition_state)
+    return {"days_with_intake": pulled, "failures": failed}
+
+
+@app.get("/api/nutrition/foods")
+def nutrition_foods(q: str, limit: int = 20):
+    """Food database search, for building meal-prep components."""
+    try:
+        return search_foods(q, max_results=limit)
+    except FatSecretError as e:
+        return {"error": str(e)}
 
 
 # ---- Serve the frontend from this same service ----
