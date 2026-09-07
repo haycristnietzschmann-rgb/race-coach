@@ -82,6 +82,48 @@ def _num_range(text: str, pattern: str):
     return lo
 
 
+
+# The planner emits two different vocabularies. Its heuristic fallback uses
+# ("Run", "easy"); Claude-generated weeks use free-form labels like
+# "run-quality" / "threshold" or "cardio-rest" / "rest". Both are legitimate
+# plan output, so the cost tables are keyed on a normalised pair and every
+# lookup goes through here. Without this, unrecognised labels fall through to
+# a generic default and a rest day gets charged as an hour of work.
+
+_TYPE_WORDS = (
+    ("swim", "Swim"),
+    ("bike", "Bike"), ("ride", "Bike"), ("cycl", "Bike"), ("spin", "Bike"),
+    ("run", "Run"), ("tempo", "Run"), ("jog", "Run"),
+)
+_HARD_WORDS = ("vo2", "interval", "hard", "anaerobic", "sprint", "race")
+_MODERATE_WORDS = ("threshold", "tempo", "sweet", "mixed", "quality", "moderate", "steady")
+_EASY_WORDS = ("easy", "recovery", "z2", "aerobic", "endurance", "long", "social")
+
+
+def normalise_session(session: dict) -> tuple:
+    """(type, intensity, is_rest) in the vocabulary the cost tables use."""
+    blob = " ".join(str(session.get(k) or "") for k in
+                    ("type", "title", "intensity", "prescription")).lower()
+
+    is_rest = ("rest" in blob and not any(w in blob for w in ("or ", "very easy", "spin")))
+    if session.get("type") and "rest" in str(session["type"]).lower():
+        is_rest = True
+
+    type_ = next((v for w, v in _TYPE_WORDS if w in blob), "Choice")
+
+    raw_int = str(session.get("intensity") or "").lower()
+    scope = raw_int + " " + blob
+    if any(w in scope for w in _HARD_WORDS):
+        intensity = "hard"
+    elif any(w in scope for w in _MODERATE_WORDS):
+        intensity = "moderate"
+    elif any(w in scope for w in _EASY_WORDS):
+        intensity = "easy"
+    else:
+        intensity = "easy"
+    return type_, intensity, is_rest
+
+
 def parse_duration_min(prescription: str, type_: str, intensity: str):
     """
     Minutes of work implied by a prescription string.
@@ -95,19 +137,34 @@ def parse_duration_min(prescription: str, type_: str, intensity: str):
     text = (prescription or "").replace("–", "-").replace("—", "-")
     key = (type_, intensity)
 
-    hours = _num_range(text, r"(\d+(?:[.,]\d+)?)\s*(?:-\s*(\d+(?:[.,]\d+)?)\s*)?h\b")
+    hours = _num_range(text, r"(\d+(?:[.,]\d+)?)\s*(?:-\s*(\d+(?:[.,]\d+)?)\s*)?\+?\s*h\b")
     if hours:
         return hours * 60
 
-    mins = _num_range(text, r"(\d+(?:[.,]\d+)?)\s*(?:-\s*(\d+(?:[.,]\d+)?)\s*)?min\b")
-    # Guard against "6x3 min hard" — an interval length, not session duration.
-    if mins and not re.search(r"[x×]\s*\d+(?:[.,]\d+)?\s*min", text, re.I):
-        return mins
+    mins = _num_range(text, r"(\d+(?:[.,]\d+)?)\s*(?:-\s*(\d+(?:[.,]\d+)?)\s*)?\+?\s*min\b")
+    # Guard against "6x3 min hard" — an interval length, not the session
+    # duration. Discard the reading rather than returning it, so a distance
+    # later in the same prescription still gets its say.
+    if mins and re.search(r"[x×]\s*\d+(?:[.,]\d+)?\s*min", text, re.I):
+        mins = None
 
-    km = _num_range(text, r"(\d+(?:[.,]\d+)?)\s*(?:-\s*(\d+(?:[.,]\d+)?)\s*)?km\b")
+    km = _num_range(text, r"(\d+(?:[.,]\d+)?)\s*(?:-\s*(\d+(?:[.,]\d+)?)\s*)?\+?\s*km\b")
+    km_min = None
     if km:
         speed = SPEED_KMH.get(key) or SPEED_KMH.get((type_, "easy")) or 25.0
-        return km / speed * 60
+        km_min = km / speed * 60
+
+    # A prescription can state both, and they often disagree — "120 min+ @ Z2,
+    # target ~100+ km" is 50 km/h if taken literally, and the trailing "+" says
+    # the stated minutes are a floor. Take the longer reading: overfeeding a
+    # long ride by a little is recoverable, underfeeding one by two hours is
+    # what ends the session early.
+    if mins and km_min:
+        return max(mins, km_min)
+    if mins:
+        return mins
+    if km_min:
+        return km_min
 
     return FALLBACK_MIN.get(key, 60)
 
@@ -120,8 +177,13 @@ def bmr(weight_kg: float, height_cm: float, age: int, sex: str = "MALE") -> floa
 
 def session_kcal(session: dict, weight_kg: float, calibration: float = 1.0) -> dict:
     """Modelled cost of one planned session, split into cardio and lift."""
-    type_ = session.get("type") or "Choice"
-    intensity = session.get("intensity") or "easy"
+    type_, intensity, is_rest = normalise_session(session)
+    if is_rest:
+        # A rest day costs nothing beyond baseline. Charging it an hour of
+        # generic work was inflating the target by roughly 500 kcal.
+        return {"cardio_kcal": 0, "lift_kcal": LIFT_KCAL.get(session.get("after_lift"), 0),
+                "minutes": 0, "type": type_, "intensity": "rest",
+                "title": session.get("title")}
     minutes = parse_duration_min(session.get("prescription"), type_, intensity)
     rate = COST_PER_KG_HR.get((type_, intensity), DEFAULT_COST)
     cardio = rate * weight_kg * (minutes / 60.0) * calibration
@@ -427,7 +489,10 @@ def training_adherence(plan: dict, activities: list,
 
     completed, missing = [], []
     for s in planned:
-        wanted = _TYPE_MATCH.get(s.get("type"), ())
+        norm_type, _, is_rest = normalise_session(s)
+        if is_rest:
+            continue           # nothing to complete on a rest day
+        wanted = _TYPE_MATCH.get(norm_type, ())
         hit = next((i for i, k in enumerate(pool)
                     if any(w in k for w in wanted)), None)
         if hit is None:
