@@ -20,7 +20,7 @@ import anthropic
 
 from coach import summarize_snapshot
 
-client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+from llm import client
 
 # Same anchor + cycle rules as the frontend (fpWeekMeta in index.html).
 BLOCK_ANCHOR_MONDAY = dt.date(2026, 8, 31)   # Monday of the week containing 2026-09-01

@@ -8,7 +8,7 @@ import os
 import json
 import anthropic
 
-client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+from llm import client
 
 SYSTEM_PROMPT = """You are a calm, experienced endurance coach speaking directly \
 to one athlete you know well. You get a JSON snapshot of their Garmin data \

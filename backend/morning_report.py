@@ -9,7 +9,7 @@ import json
 import anthropic
 from coach import summarize_snapshot
 
-client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+from llm import client
 
 SYSTEM_PROMPT = """You write a short "good morning" briefing for one athlete, \
 based on their overnight Garmin data. This is broader than goal-specific coaching \

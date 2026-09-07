@@ -46,7 +46,10 @@ with tempfile.TemporaryDirectory() as tmp:
 
     print(f"Logging in as {email} ...")
     garmin = Garmin(email, password)
-    garmin.login(str(token_dir))
+    # login(tokenstore) *loads* an existing session in garminconnect 0.2.8 and
+    # raises FileNotFoundError on an empty dir. A fresh password login takes no
+    # argument; the dump loop below is what writes the session out.
+    garmin.login()
     print("Login call completed.")
 
     # Try every known way this library (or its dependencies) might expose
