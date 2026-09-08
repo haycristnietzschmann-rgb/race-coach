@@ -187,8 +187,8 @@ def parse_prescription(text: str, sport: str, ftp: int = None) -> list[dict]:
         r"(?:easy\s+|steady\s+)?(?:jog|easy|float|recovery|rest|spin|walk))?",
         low,
     )
-    total = re.search(r"(\d+(?:[–-]\d+)?(?:\.\d+)?)\s*(h|hour|hours|min|mins|minutes)\b", low)
-    dist = re.search(r"(\d+(?:[–-]\d+)?)\s*km\b", low)
+    total = re.search(r"(\d+(?:[–-]\d+)?(?:\.\d+)?)\s*\+?\s*(h|hour|hours|min|mins|minutes)\b", low)
+    dist = re.search(r"(\d+(?:[–-]\d+)?)\s*\+?\s*km\b", low)
     pace = _pace_to_mps(low)
 
     if rep:
@@ -258,8 +258,12 @@ def parse_prescription(text: str, sport: str, ftp: int = None) -> list[dict]:
                                 target=dt_, t1=d1, t2=d2, desc=text))
         return steps
 
-    # fallback: one lap-button step carrying the whole instruction
-    return [_exec_step(1, "other", 0, end_cond=_END_LAP, desc=text or "See plan")]
+    # fallback: one lap-button step carrying the whole instruction. Even here
+    # a bike step gets a power band — an untargeted step is precisely what
+    # drops a smart trainer out of ERG.
+    ft, f1, f2 = _tw()
+    return [_exec_step(1, "other", 0, end_cond=_END_LAP, target=ft, t1=f1, t2=f2,
+                       desc=text or "See plan")]
 
 
 def _renumber(steps: list[dict], start: int = 1) -> int:
