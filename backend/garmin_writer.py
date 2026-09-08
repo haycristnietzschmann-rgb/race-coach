@@ -36,6 +36,55 @@ _END_LAP = {"conditionTypeId": 1, "conditionTypeKey": "lap.button"}
 _TARGET_NONE = {"workoutTargetTypeId": 1, "workoutTargetTypeKey": "no.target"}
 _TARGET_PACE = {"workoutTargetTypeId": 6, "workoutTargetTypeKey": "pace.zone"}
 _TARGET_HR = {"workoutTargetTypeId": 4, "workoutTargetTypeKey": "heart.rate.zone"}
+_TARGET_POWER = {"workoutTargetTypeId": 2, "workoutTargetTypeKey": "power.zone"}
+
+# Percentage-of-FTP bands per step. Without a power target Garmin marks a bike
+# workout as having "non power-based steps", and a smart trainer (Tacx Flow)
+# drops out of ERG and asks the rider to change gear by hand — which defeats
+# the point of prescribing intervals at all. Running keeps pace targets; only
+# cycling gets these.
+_FTP_BAND = {
+    "warmup": (0.50, 0.65),
+    "cooldown": (0.45, 0.55),
+    "recovery": (0.40, 0.55),
+    "vo2": (1.06, 1.20),
+    "threshold": (0.95, 1.05),
+    "sweetspot": (0.84, 0.97),
+    "steady": (0.56, 0.75),
+}
+
+
+def _explicit_ftp_pct(text: str):
+    """Read a stated intensity — "95-105% FTP", "@ 90% ftp" — if present."""
+    t = (text or "").replace("–", "-").replace("—", "-")
+    m = re.search(r"(\d{2,3})\s*-\s*(\d{2,3})\s*%\s*(?:of\s*)?ftp", t, re.I)
+    if m:
+        return int(m.group(1)) / 100, int(m.group(2)) / 100
+    m = re.search(r"(\d{2,3})\s*%\s*(?:of\s*)?ftp", t, re.I)
+    if m:
+        p = int(m.group(1)) / 100
+        return round(p - 0.03, 3), round(p + 0.03, 3)
+    return None
+
+
+def _work_band(text: str):
+    """Which band a work interval belongs to, from how it is described."""
+    low = (text or "").lower()
+    if any(w in low for w in ("vo2", "vo₂", "max repeats", "anaerobic", "hard")):
+        return _FTP_BAND["vo2"]
+    if any(w in low for w in ("threshold", "ftp", "lt2")):
+        return _FTP_BAND["threshold"]
+    if any(w in low for w in ("sweet", "ss", "tempo")):
+        return _FTP_BAND["sweetspot"]
+    return _FTP_BAND["steady"]
+
+
+def _power_target(ftp, band):
+    """(target, low_w, high_w) for a band, or a no-target triple without FTP."""
+    if not ftp or not band:
+        return _TARGET_NONE, None, None
+    lo, hi = band
+    return _TARGET_POWER, int(round(ftp * lo)), int(round(ftp * hi))
 
 
 # ------------------------------------------------------------ prescription parse
@@ -88,7 +137,7 @@ def _exec_step(order: int, kind: str, end_val: int, end_cond=None, target=None,
     return step
 
 
-def parse_prescription(text: str, sport: str) -> list[dict]:
+def parse_prescription(text: str, sport: str, ftp: int = None) -> list[dict]:
     """Turn a free-text prescription into Garmin workout steps. Best-effort:
     whatever can't be parsed becomes a single timed step carrying the text, so
     a workout is always produced."""
@@ -100,13 +149,42 @@ def parse_prescription(text: str, sport: str) -> list[dict]:
     warm = 900 if sport == "cycling" else 600
     cool = 600 if sport == "cycling" else 300
 
+    # Cycling steps carry watts; running keeps pace. Anything the trainer can
+    # hold in ERG has to be expressed as power, so the band is resolved here
+    # once and reused for every step below.
+    use_power = sport == "cycling" and bool(ftp)
+    work_band = (_explicit_ftp_pct(text) or _work_band(text)) if use_power else None
+
+    def _t(kind):
+        """(target, t1, t2) for a non-work step."""
+        if use_power:
+            return _power_target(ftp, _FTP_BAND[kind])
+        return _TARGET_NONE, None, None
+
+    def _tw():
+        """(target, t1, t2) for the working effort."""
+        if use_power:
+            return _power_target(ftp, work_band)
+        # `pace` is assigned below; this closure only runs after that.
+        if pace:
+            return _TARGET_PACE, pace[0], pace[1]
+        return _TARGET_NONE, None, None
+
     # repeat: "6×3 min ... / 2 min jog"  or  "3x10min @ threshold, 5 min easy"
     rep = re.search(
         r"(\d+)\s*(?:[–-]\s*\d+\s*)?[×x]\s*"
         r"(\d+(?:[–-]\d+)?)\s*(min|mins|minutes|sec|secs|s|h)\b"
-        r"(?:[^,/]*?(?:@\s*[\d:]+\s*/\s*km)?)?"
-        r"(?:\s*[,/]\s*(\d+(?:[–-]\d+)?)\s*(min|mins|sec|secs|s)\s*"
-        r"(?:jog|easy|float|recovery|rest|spin|walk)?)?",
+        # Greedy, not lazy: text between the interval and its recovery ("3x5
+        # min at FTP, 5 min recovery") has to be consumed for the recovery
+        # clause to be reached at all. Lazy matching preferred the empty string
+        # and silently fell back to a default 90 s float.
+        r"(?:[^,/(]*(?:@\s*[\d:]+\s*/\s*km)?)?"
+        # The recovery word is required, not optional. Greedy matching above
+        # otherwise runs past "(3 min easy recovery)" and reads "10 min
+        # cool-down" as the float. Parentheses count as a separator, since
+        # plans write the recovery inside them as often as after a comma.
+        r"(?:\s*[,/(]\s*(\d+(?:[–-]\d+)?)\s*(min|mins|sec|secs|s)\s*"
+        r"(?:easy\s+|steady\s+)?(?:jog|easy|float|recovery|rest|spin|walk))?",
         low,
     )
     total = re.search(r"(\d+(?:[–-]\d+)?(?:\.\d+)?)\s*(h|hour|hours|min|mins|minutes)\b", low)
@@ -123,18 +201,24 @@ def parse_prescription(text: str, sport: str) -> list[dict]:
         # a stated total duration AROUND the reps -> steady base, then the set.
         total_s = _to_seconds(total.group(1), total.group(2)) if total else 0
         if total_s and total_s > rep_total + warm:
-            steps.append(_exec_step(order, "warmup", warm, desc="Warm-up easy")); order += 1
+            wt, w1, w2 = _t("warmup")
+            steps.append(_exec_step(order, "warmup", warm, target=wt, t1=w1, t2=w2,
+                                    desc="Warm-up easy")); order += 1
             steady = max(300, total_s - rep_total - warm - cool)
-            steps.append(_exec_step(order, "interval", steady, desc="Steady aerobic base")); order += 1
+            st, s1, s2 = _t("steady")
+            steps.append(_exec_step(order, "interval", steady, target=st, t1=s1, t2=s2,
+                                    desc="Steady aerobic base")); order += 1
         else:
-            steps.append(_exec_step(order, "warmup", warm, desc="Warm-up easy")); order += 1
+            wt, w1, w2 = _t("warmup")
+            steps.append(_exec_step(order, "warmup", warm, target=wt, t1=w1, t2=w2,
+                                    desc="Warm-up easy")); order += 1
 
+        it, i1, i2 = _tw()
+        rt, r1, r2 = _t("recovery")
         inner = [
-            _exec_step(order + 1, "interval", work_s,
-                       target=_TARGET_PACE if pace else _TARGET_NONE,
-                       t1=pace[0] if pace else None, t2=pace[1] if pace else None,
-                       desc=text),
-            _exec_step(order + 2, "recovery", rec_s, desc="Easy recovery"),
+            _exec_step(order + 1, "interval", work_s, target=it, t1=i1, t2=i2, desc=text),
+            _exec_step(order + 2, "recovery", rec_s, target=rt, t1=r1, t2=r2,
+                       desc="Easy recovery"),
         ]
         steps.append({
             "type": "RepeatGroupDTO",
@@ -145,27 +229,33 @@ def parse_prescription(text: str, sport: str) -> list[dict]:
             "workoutSteps": inner,
         })
         order += 3
-        steps.append(_exec_step(order, "cooldown", cool, desc="Cool-down easy"))
+        ct, c1, c2 = _t("cooldown")
+        steps.append(_exec_step(order, "cooldown", cool, target=ct, t1=c1, t2=c2,
+                                desc="Cool-down easy"))
         return steps
 
     # steady session with a stated duration or distance
     if total:
         secs = _to_seconds(total.group(1), total.group(2))
         if not is_long:
-            steps.append(_exec_step(order, "warmup", warm, desc="Warm-up")); order += 1
+            wt, w1, w2 = _t("warmup")
+            steps.append(_exec_step(order, "warmup", warm, target=wt, t1=w1, t2=w2,
+                                    desc="Warm-up")); order += 1
             secs = max(300, secs - warm - cool)
-        steps.append(_exec_step(order, "interval", secs,
-                                target=_TARGET_PACE if pace else _TARGET_NONE,
-                                t1=pace[0] if pace else None, t2=pace[1] if pace else None,
+        mt, m1, m2 = _tw()
+        steps.append(_exec_step(order, "interval", secs, target=mt, t1=m1, t2=m2,
                                 desc=text)); order += 1
         if not is_long:
-            steps.append(_exec_step(order, "cooldown", cool, desc="Cool-down"))
+            ct, c1, c2 = _t("cooldown")
+            steps.append(_exec_step(order, "cooldown", cool, target=ct, t1=c1, t2=c2,
+                                    desc="Cool-down"))
         return steps
 
     if dist:
         km = _mid(dist.group(1))
+        dt_, d1, d2 = _tw()
         steps.append(_exec_step(order, "interval", int(km * 1000), end_cond=_END_DIST,
-                                target=_TARGET_NONE, desc=text))
+                                target=dt_, t1=d1, t2=d2, desc=text))
         return steps
 
     # fallback: one lap-button step carrying the whole instruction
@@ -316,10 +406,59 @@ def reconcile_week(week_start: str, plan: dict) -> dict:
 _SPORT_ID = {"Run": "running", "Bike": "cycling", "running": "running", "cycling": "cycling"}
 
 
-def push_workout(name: str, sport: str, prescription: str, date: str | None = None) -> dict:
+def current_ftp() -> int | None:
+    """
+    Cycling FTP, or None. Watt targets are meaningless without it.
+
+    CYCLING_FTP wins when set. Garmin does expose functionalThresholdPower on
+    the biometric profile, but returns null for a manually-entered FTP — which
+    is exactly the case here — so the profile lookup is a fallback rather than
+    the source of truth. training_status does not carry the field at all,
+    despite planner.py having read it from there since the beginning.
+    """
+    env = os.environ.get("CYCLING_FTP")
+    if env:
+        try:
+            return int(env)
+        except ValueError:
+            print(f"CYCLING_FTP is not a number: {env!r} — ignoring")
+    try:
+        r = get_client().api.garth.connectapi(
+            "/userprofile-service/userprofile/personal-information") or {}
+        ftp = (r.get("biometricProfile") or {}).get("functionalThresholdPower")
+        if ftp:
+            return int(ftp)
+    except Exception as e:
+        print(f"current_ftp lookup failed: {e}")
+    return None
+
+
+def sport_of(session: dict) -> str | None:
+    """
+    "cycling" / "running" / None, from however the planner labelled it.
+
+    The heuristic planner emits "Bike"; Claude emits "bike-quality",
+    "long-ride", "midweek-long". Matching on the exact strings meant every
+    Claude-generated session was silently skipped and never reached Garmin.
+    """
+    blob = " ".join(str(session.get(k) or "") for k in
+                    ("type", "title", "prescription")).lower()
+    if any(w in blob for w in ("swim",)):
+        return None
+    if any(w in blob for w in ("bike", "ride", "cycl", "spin", "ftp", "watt")):
+        return "cycling"
+    if any(w in blob for w in ("run", "jog", "tempo run", "strides")):
+        return "running"
+    return None
+
+
+def push_workout(name: str, sport: str, prescription: str, date: str | None = None,
+                 ftp: int = None) -> dict:
     """Create one structured workout, optionally schedule it on `date`."""
-    sport_key = _SPORT_ID.get(sport, "running")
-    steps = parse_prescription(prescription, sport_key)
+    sport_key = _SPORT_ID.get(sport, sport if sport in ("cycling", "running") else "running")
+    if sport_key == "cycling" and ftp is None:
+        ftp = current_ftp()
+    steps = parse_prescription(prescription, sport_key, ftp=ftp)
     payload = build_workout_payload(name, sport_key, steps)
     if os.environ.get("GARMIN_FIXTURE_MODE"):
         return {"ok": True, "workout_id": "fixture", "name": name, "steps": len(steps),
@@ -354,16 +493,18 @@ def push_week(week_start: str, plan: dict) -> dict:
     except Exception:
         pass
 
+    ftp = current_ftp()
     out = []
     for s in sessions:
-        typ = s.get("type")
-        if typ not in ("Run", "Bike", "running", "cycling"):
+        sport = sport_of(s)
+        if not sport:
             continue
         name = f"{s.get('day', '')} — {s.get('title', 'Session')}".strip(" —")
         out.append({
             "day": s.get("day"),
-            "result": push_workout(name, typ, s.get("prescription") or s.get("title") or "",
-                                   day_to_date.get(s.get("day"))),
+            "sport": sport,
+            "result": push_workout(name, sport, s.get("prescription") or s.get("title") or "",
+                                   day_to_date.get(s.get("day")), ftp=ftp),
         })
     pushed = sum(1 for o in out if o["result"].get("ok"))
     return {"week_start": week_start, "pushed": pushed, "total": len(out), "items": out}
