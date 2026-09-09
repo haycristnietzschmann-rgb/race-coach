@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from garmin_client import get_client
+from garmin_client import get_client, token_status
 from coach import generate_brief, answer_chat, summarize_snapshot
 from morning_report import generate_morning_report
 from push import add_subscription, send_notification_to_all
@@ -883,6 +883,12 @@ def nutrition_prep_portion(body: dict):
     batch = batch_totals(body.get("ingredients") or [])
     return portion_batch(batch, body.get("cooked_grams"), days,
                          float(body.get("share_of_day", 1.0)))
+
+
+@app.get("/api/garmin/status")
+def garmin_status():
+    """Diagnose the Garmin session: env var, token expiry, live call."""
+    return token_status()
 
 
 # ---- Serve the frontend from this same service ----

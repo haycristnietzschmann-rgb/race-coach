@@ -19,6 +19,8 @@ import datetime as dt
 from pathlib import Path
 from functools import lru_cache
 
+import json
+
 import garminconnect
 
 # Where a resumable session (from generate_garmin_tokens.py) gets unpacked to.
@@ -35,17 +37,60 @@ def _ensure_tokens_on_disk() -> None:
     if not b64:
         print("GARMIN_TOKENS_B64 not set — will attempt a fresh login (blocked on Render).")
         return
-    if (TOKEN_DIR / "oauth1_token.json").exists():
-        return
     try:
         TOKEN_DIR.mkdir(parents=True, exist_ok=True)
         raw = base64.b64decode("".join(b64.split()))  # tolerate wrapped/space-padded env values
+        # Always re-unpack rather than skipping when files are present. Garth
+        # rewrites these on refresh, so an on-disk copy can be older *or*
+        # newer than the environment's — and skipping meant a freshly minted
+        # GARMIN_TOKENS_B64 was silently ignored for the life of the container.
         with zipfile.ZipFile(io.BytesIO(raw)) as zf:
             zf.extractall(TOKEN_DIR)
         got = sorted(p.name for p in TOKEN_DIR.iterdir())
         print(f"GARMIN_TOKENS_B64 unpacked to {TOKEN_DIR}: {got}")
     except Exception as e:
         print(f"Could not unpack GARMIN_TOKENS_B64: {e}")
+
+
+
+def token_status() -> dict:
+    """
+    Why Garmin data is or is not flowing — without needing the host's logs.
+
+    Garmin answers a rejected session with an empty body, which surfaces
+    downstream as "Expecting value: line 1 column 1" and says nothing about
+    the cause. This reports the three things that actually distinguish the
+    cases: whether the environment carries a session at all, when its access
+    token expires, and what a real call does right now.
+    """
+    import datetime as _dt
+    out = {"env_var_set": bool(os.environ.get("GARMIN_TOKENS_B64")),
+           "token_dir": str(TOKEN_DIR)}
+    # Unpack first: the files are written lazily on client construction, so
+    # inspecting them beforehand reports "missing" for a session that is
+    # present and about to work.
+    _ensure_tokens_on_disk()
+    try:
+        p = TOKEN_DIR / "oauth2_token.json"
+        out["token_files_present"] = p.exists()
+        if p.exists():
+            d = json.loads(p.read_text())
+            for k in ("expires_at", "refresh_token_expires_at"):
+                if d.get(k):
+                    when = _dt.datetime.fromtimestamp(d[k])
+                    out[k] = when.isoformat(timespec="seconds")
+                    out[k + "_expired"] = when < _dt.datetime.now()
+    except Exception as e:
+        out["token_read_error"] = str(e)
+
+    try:
+        prof = get_client().api.garth.connectapi(
+            "/userprofile-service/userprofile/user-settings") or {}
+        out["live_call"] = "ok" if prof.get("userData") else "empty response"
+    except Exception as e:
+        out["live_call"] = "failed"
+        out["live_error"] = f"{type(e).__name__}: {str(e)[:300]}"
+    return out
 
 
 class GarminClient:
