@@ -40,10 +40,25 @@ def _ensure_tokens_on_disk() -> None:
     try:
         TOKEN_DIR.mkdir(parents=True, exist_ok=True)
         raw = base64.b64decode("".join(b64.split()))  # tolerate wrapped/space-padded env values
-        # Always re-unpack rather than skipping when files are present. Garth
-        # rewrites these on refresh, so an on-disk copy can be older *or*
-        # newer than the environment's — and skipping meant a freshly minted
-        # GARMIN_TOKENS_B64 was silently ignored for the life of the container.
+
+        # Unpack only when the environment's session is actually newer than
+        # what is on disk. Skipping unconditionally meant a freshly minted
+        # GARMIN_TOKENS_B64 was ignored for the life of the container; but
+        # unpacking unconditionally is worse — garth rewrites these files when
+        # it refreshes, so clobbering them with the older env blob throws away
+        # a live session and forces another refresh that may not be allowed
+        # from this host.
+        on_disk = TOKEN_DIR / "oauth2_token.json"
+        if on_disk.exists():
+            try:
+                with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+                    incoming = json.loads(zf.read("oauth2_token.json"))
+                current = json.loads(on_disk.read_text())
+                if incoming.get("expires_at", 0) <= current.get("expires_at", 0):
+                    return
+                print("GARMIN_TOKENS_B64 is newer than the unpacked session — replacing it.")
+            except Exception as e:
+                print(f"Could not compare token freshness ({e}) — re-unpacking.")
         with zipfile.ZipFile(io.BytesIO(raw)) as zf:
             zf.extractall(TOKEN_DIR)
         got = sorted(p.name for p in TOKEN_DIR.iterdir())
