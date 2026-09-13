@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import os
 import json
+import hmac
 import datetime as dt
 from pathlib import Path
 from functools import lru_cache
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -15,6 +16,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from garmin_client import get_client, token_status
+from snapshot import serve, save as save_snapshot, load as load_snapshot, age_hours
 from coach import generate_brief, answer_chat, summarize_snapshot
 from morning_report import generate_morning_report
 from push import add_subscription, send_notification_to_all
@@ -314,6 +316,10 @@ _overview_cache: dict = {}
 
 @app.get("/api/overview")
 def overview(span: str = "week", refresh: bool = False):
+    return serve(f"overview:{span}", lambda: _overview_live(span, refresh))
+
+
+def _overview_live(span: str = "week", refresh: bool = False):
     """span: week | month | 3month"""
     if span not in ("week", "month", "3month"):
         span = "week"
@@ -354,6 +360,10 @@ _training_cache: dict = {}
 
 @app.get("/api/training")
 def training(week_offset: int = 0, refresh: bool = False):
+    return serve(f"training:{week_offset}", lambda: _training_live(week_offset, refresh))
+
+
+def _training_live(week_offset: int = 0, refresh: bool = False):
     key = f"{week_offset}:{dt.date.today().isoformat()}"
     if key in _training_cache and not refresh:
         return _training_cache[key]
@@ -521,6 +531,10 @@ def plan_adjust(body: dict = None):
 
 @app.get("/api/fitness")
 def fitness(refresh: bool = False):
+    return serve("fitness", lambda: _fitness_live(refresh))
+
+
+def _fitness_live(refresh: bool = False):
     key = dt.date.today().isoformat()
     if _fitness_cache.get("key") == key and not refresh:
         return _fitness_cache["data"]
@@ -549,6 +563,10 @@ _sleep_cache: dict = {}
 
 @app.get("/api/sleep")
 def sleep(refresh: bool = False):
+    return serve("sleep", lambda: _sleep_live(refresh))
+
+
+def _sleep_live(refresh: bool = False):
     key = dt.date.today().isoformat()
     if _sleep_cache.get("key") == key and not refresh:
         return _sleep_cache["data"]
@@ -889,6 +907,40 @@ def nutrition_prep_portion(body: dict):
 def garmin_status():
     """Diagnose the Garmin session: env var, token expiry, live call."""
     return token_status()
+
+
+@app.post("/api/sync/push")
+def sync_push(body: dict, x_sync_secret: str = Header(None)):
+    """
+    Accept a bundle of dashboard payloads from the athlete's own machine.
+
+    Shared-secret authenticated: this replaces what every reader sees, so it
+    must not be open. Refuses outright when SYNC_SECRET is unset rather than
+    defaulting to open — an unset secret on a public host is the failure that
+    matters here.
+    """
+    expected = os.environ.get("SYNC_SECRET")
+    if not expected:
+        raise HTTPException(status_code=503, detail="SYNC_SECRET is not configured on this server.")
+    if not x_sync_secret or not hmac.compare_digest(x_sync_secret, expected):
+        raise HTTPException(status_code=401, detail="Bad or missing X-Sync-Secret.")
+    payloads = (body or {}).get("payloads")
+    if not isinstance(payloads, dict) or not payloads:
+        raise HTTPException(status_code=400, detail="Body needs a non-empty 'payloads' object.")
+    return save_snapshot(payloads)
+
+
+@app.get("/api/sync/status")
+def sync_status():
+    """When the snapshot was last refreshed, and what it holds."""
+    data = load_snapshot()
+    age = age_hours(data.get("pushed_at"))
+    return {
+        "pushed_at": data.get("pushed_at"),
+        "age_hours": round(age, 1) if age is not None else None,
+        "keys": sorted((data.get("payloads") or {}).keys()),
+        "secret_configured": bool(os.environ.get("SYNC_SECRET")),
+    }
 
 
 # ---- Serve the frontend from this same service ----

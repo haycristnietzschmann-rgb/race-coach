@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.racecoach.sync</string>
+
+  <!-- The venv interpreter, not the system python: the agent imports the
+       backend, which needs garminconnect/garth/fastapi. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/Cristianon/Downloads/race-coach/backend/venv/bin/python3</string>
+    <string>/Users/Cristianon/Downloads/race-coach/scripts/sync_agent.py</string>
+  </array>
+
+  <!-- Every 3 hours. The access token lives a day or two, so this refreshes
+       the session long before it lapses, and the snapshot stays current
+       enough that a few hours of the Mac being shut is invisible. -->
+  <key>StartInterval</key>
+  <integer>10800</integer>
+
+  <!-- Catch up after the Mac has been asleep or off, rather than waiting for
+       the next interval — which is exactly when the snapshot is stalest. -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/Cristianon/Downloads/race-coach</string>
+
+  <key>StandardOutPath</key>
+  <string>/Users/Cristianon/Library/Logs/race-coach-sync.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/Cristianon/Library/Logs/race-coach-sync.log</string>
+</dict>
+</plist>

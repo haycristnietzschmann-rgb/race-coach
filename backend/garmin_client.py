@@ -115,17 +115,30 @@ class GarminClient:
         password = os.environ.get("GARMIN_PASSWORD")
         self.api = garminconnect.Garmin(email, password)
         have_tokens = (TOKEN_DIR / "oauth1_token.json").exists()
+        if not have_tokens:
+            # No stored session. login(tokenstore) *loads* in this version and
+            # raises FileNotFoundError on an empty directory, so a fresh
+            # password login has to be asked for explicitly — and the result
+            # saved, or every run logs in again and invites a rate limit.
+            # This path only works from a machine Garmin does not block.
+            print("No stored Garmin session — attempting a password login.")
+            self.api.login()
+            try:
+                TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+                self.api.garth.dump(str(TOKEN_DIR))
+                print(f"Saved a resumable session to {TOKEN_DIR}")
+            except Exception as e:
+                print(f"Could not save the session ({e}) — it will re-login next time.")
+            return
+
         try:
             # login(tokenstore) resumes the saved session in this garminconnect
             # version; it does not fall back to a password login.
             self.api.login(str(TOKEN_DIR))
         except Exception as e:
-            if have_tokens:
-                # Last-ditch: load the session straight through garth.
-                print(f"login(tokenstore) failed ({e}) — trying garth.load()")
-                self.api.garth.load(str(TOKEN_DIR))
-            else:
-                raise
+            # Last-ditch: load the session straight through garth.
+            print(f"login(tokenstore) failed ({e}) — trying garth.load()")
+            self.api.garth.load(str(TOKEN_DIR))
 
     def get_user_profile(self) -> dict:
         """
